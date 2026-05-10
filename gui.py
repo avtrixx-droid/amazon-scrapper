@@ -9,11 +9,27 @@ import multiprocessing
 import sys
 import threading
 import time
+import warnings
 import webbrowser
+
+warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+def _get_base_dir() -> Path:
+    """Return user-writable base dir: handles PyInstaller frozen .exe and .app."""
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).resolve()
+        # Inside macOS .app bundle — use ~/Library/Application Support to stay writable
+        if sys.platform == "darwin" and ".app/Contents/MacOS" in str(exe):
+            d = Path.home() / "Library" / "Application Support" / "AmazonScraper"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        # Windows or macOS non-.app: directory that contains the exe
+        return exe.parent
+    return Path(__file__).resolve().parent
+
+BASE_DIR = _get_base_dir()
 sys.path.insert(0, str(BASE_DIR))
 
 from flask import Flask, Response, jsonify, render_template_string, request
@@ -23,6 +39,22 @@ app = Flask(__name__)
 app.logger.setLevel(logging.ERROR)
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
+
+# ── Startup crash log (always on; written before Flask starts) ─────────────────
+def _init_startup_log() -> None:
+    try:
+        log_dir = BASE_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(str(log_dir / "startup.log"), encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        logging.getLogger().addHandler(fh)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("startup").info(f"BASE_DIR={BASE_DIR}  frozen={getattr(sys,'frozen',False)}")
+    except Exception:
+        pass  # Never crash on logging setup
+
+_init_startup_log()
 
 # ── Global run state ──────────────────────────────────────────────────────────
 
@@ -806,10 +838,18 @@ def _open_browser():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    try:
-        multiprocessing.set_start_method("fork")
-    except RuntimeError:
-        pass
+    # When frozen, always use spawn — fork is unsafe after threads are started
+    # and is unavailable on Windows. In dev, prefer fork on Unix for speed.
+    if getattr(sys, "frozen", False):
+        try:
+            multiprocessing.set_start_method("spawn")
+        except RuntimeError:
+            pass
+    else:
+        try:
+            multiprocessing.set_start_method("fork")
+        except RuntimeError:
+            pass
 
     print("=" * 48)
     print("Amazon Scraper is starting…")
@@ -818,5 +858,15 @@ if __name__ == "__main__":
     print("=" * 48)
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host="127.0.0.1", port=5050, debug=False,
-            use_reloader=False, threaded=True)
+    try:
+        app.run(host="127.0.0.1", port=5050, debug=False,
+                use_reloader=False, threaded=True)
+    except Exception as _e:
+        _crash_log = BASE_DIR / "logs" / "crash.log"
+        try:
+            import traceback
+            _crash_log.parent.mkdir(parents=True, exist_ok=True)
+            _crash_log.write_text(traceback.format_exc(), encoding="utf-8")
+        except Exception:
+            pass
+        raise

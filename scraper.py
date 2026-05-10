@@ -1163,7 +1163,12 @@ def resolve_output_path(settings: Dict[str, object]) -> Path:
         probe.unlink(missing_ok=True)  # type: ignore[arg-type]
         return folder / filename
     except Exception:
-        fallback = Path(__file__).resolve().parent / "output"
+        # When frozen by PyInstaller, __file__ points inside _MEIPASS temp dir;
+        # write user data next to the executable instead.
+        if getattr(sys, "frozen", False):
+            fallback = Path(sys.executable).resolve().parent / "output"
+        else:
+            fallback = Path(__file__).resolve().parent / "output"
         fallback.mkdir(parents=True, exist_ok=True)
         print(f"Could not write to '{folder}'. Saving report to: {fallback}")
         return fallback / filename

@@ -1,0 +1,5 @@
+# Format: pincode,City Name
+# One per line. Lines starting with # are ignored.
+110001,Delhi
+400001,Mumbai
+
