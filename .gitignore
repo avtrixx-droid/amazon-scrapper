@@ -1,0 +1,21 @@
+# Python virtual environment — recreated automatically by run_mac.sh / run_windows.bat
+.venv/
+
+# Generated at runtime — never commit these
+progress/
+logs/
+output/
+templates/
+
+# macOS system files
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+
+# Excel reports (can be large; share via email or Drive instead)
+*.xlsx
+
+# Secrets / personal config overrides (if you ever add one)
+config.local.py
+.env

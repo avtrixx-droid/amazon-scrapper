@@ -1,0 +1,7 @@
+# Format: ASIN , Item Name , Lapcare Item Code
+# Lines starting with # are category headers
+# Item Name and Lapcare Item Code are optional
+
+# Laptops & Accessories
+B0DSKNKCYX ,
+B0F6ZLFNVT ,
