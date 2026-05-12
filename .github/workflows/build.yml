@@ -30,10 +30,10 @@ jobs:
       - name: Assemble release folder
         run: |
           mkdir dist\Release_Windows
-          xcopy /s /e /q dist\AmazonScraper dist\Release_Windows\
-          copy README_VENDOR_APP.txt dist\Release_Windows\
-          copy asins.txt             dist\Release_Windows\
-          copy pincodes.txt          dist\Release_Windows\
+          copy dist\AmazonScraper.exe dist\Release_Windows\
+          copy README_VENDOR_APP.txt  dist\Release_Windows\
+          copy asins.txt              dist\Release_Windows\
+          copy pincodes.txt           dist\Release_Windows\
 
       - name: Upload .exe artifact
         uses: actions/upload-artifact@v4

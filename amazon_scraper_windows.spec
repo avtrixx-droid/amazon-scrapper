@@ -168,8 +168,10 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,          # bundled into single .exe (onefile mode)
+    a.zipfiles,
+    a.datas,
+    exclude_binaries=False,
     name="AmazonScraper",
     debug=False,
     bootloader_ignore_signals=False,
@@ -184,13 +186,5 @@ exe = EXE(
     icon=None,           # Replace with "icon.ico" if you have one
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name="AmazonScraper",
-)
+# COLLECT removed — onefile mode bundles all DLLs inside the .exe,
+# preventing "python311.dll not found" errors when users run from inside a ZIP.
