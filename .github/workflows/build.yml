@@ -1,0 +1,86 @@
+name: Build Distributables
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:       # allows manual trigger from GitHub UI
+
+jobs:
+
+  # ── Windows .exe ────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build .exe
+        run: pyinstaller amazon_scraper_windows.spec --clean --noconfirm
+
+      - name: Assemble release folder
+        run: |
+          mkdir dist\Release_Windows
+          xcopy /s /e /q dist\AmazonScraper dist\Release_Windows\
+          copy README_VENDOR_APP.txt dist\Release_Windows\
+          copy asins.txt             dist\Release_Windows\
+          copy pincodes.txt          dist\Release_Windows\
+
+      - name: Upload .exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonScraper-Windows
+          path: dist\Release_Windows\
+          retention-days: 30
+
+  # ── macOS .app ──────────────────────────────────────────────────────────────
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build .app
+        run: pyinstaller amazon_scraper_mac.spec --clean --noconfirm
+
+      - name: Remove quarantine flag
+        run: xattr -cr dist/AmazonScraper.app || true
+
+      - name: Assemble release folder
+        run: |
+          mkdir -p dist/Release_Mac
+          cp -r dist/AmazonScraper.app dist/Release_Mac/
+          cp README_VENDOR_APP.txt dist/Release_Mac/
+          cp asins.txt dist/Release_Mac/
+          cp pincodes.txt dist/Release_Mac/
+
+      - name: Zip .app for download
+        run: |
+          cd dist/Release_Mac
+          zip -r ../AmazonScraper-Mac.zip .
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonScraper-Mac
+          path: dist/AmazonScraper-Mac.zip
+          retention-days: 30
