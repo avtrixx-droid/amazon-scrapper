@@ -168,6 +168,24 @@ If it keeps happening, try:
 
 
 =====================================================
+IF YOUR MAC SAYS "CANNOT BE OPENED" OR "DAMAGED"
+=====================================================
+
+This is a Mac security warning, not a real problem.
+Do these steps ONE TIME after you first receive the app:
+
+1. Find the AmazonScraper app in your Downloads or Desktop.
+2. Right-click on it (or two-finger tap on trackpad).
+3. Select "Open" from the menu.
+4. A warning window appears — click "Open" again.
+
+After doing this once, the app will open normally forever.
+
+If the above does not work, contact your IT team and ask them to run:
+   xattr -cr /path/to/AmazonScraper.app
+
+
+=====================================================
 IF SOMETHING GOES WRONG
 =====================================================
 

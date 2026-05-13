@@ -1,11 +1,16 @@
-# Python virtual environment — recreated automatically by run_mac.sh / run_windows.bat
+# Python virtual environments — recreated automatically
 .venv/
+.venv_build/
 
 # Generated at runtime — never commit these
 progress/
 logs/
 output/
-templates/
+.scraper.lock
+
+# PyInstaller build output — rebuild from spec files, not versioned
+build/
+dist/
 
 # macOS system files
 .DS_Store
@@ -13,9 +18,12 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Excel reports (can be large; share via email or Drive instead)
+# IDE files
+.idea/
+
+# Excel reports (share via email or Drive)
 *.xlsx
 
-# Secrets / personal config overrides (if you ever add one)
+# Secrets / personal config overrides
 config.local.py
 .env

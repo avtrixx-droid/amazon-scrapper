@@ -36,6 +36,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 import config
 
+__version__ = "2.0.0"
+
 # Module-level state — reachable by atexit and signal handlers
 CHROME_TEMP_DIR: Optional[str] = None
 LOCK_FILE: Optional[Path] = None
@@ -1981,6 +1983,31 @@ def open_file_cross_platform(path: Path) -> None:
 
 
 def main() -> None:
+    # Handle --version before any startup side-effects (lock, Chrome, etc.)
+    if "--version" in sys.argv:
+        print(f"AmazonScraper {__version__} | Python {sys.version.split()[0]}")
+        try:
+            import undetected_chromedriver as _uc
+            print(f"undetected-chromedriver {_uc.__version__}")
+        except Exception:
+            pass
+        try:
+            import selenium as _sel
+            print(f"selenium {_sel.__version__}")
+        except Exception:
+            pass
+        try:
+            import psutil as _ps
+            print(f"psutil {_ps.__version__}")
+        except Exception:
+            pass
+        try:
+            import openpyxl as _xl
+            print(f"openpyxl {_xl.__version__}")
+        except Exception:
+            pass
+        sys.exit(0)
+
     print_header()
 
     base_dir = Path(__file__).resolve().parent

@@ -136,6 +136,12 @@ a = Analysis(
         "packaging",
         "packaging.version",
         "packaging.requirements",
+        # ── psutil (process/PID lock — platform backends missed by static analysis) ──
+        "psutil",
+        "psutil._psutil_windows",
+        "psutil._psutil_linux",
+        "psutil._psutil_osx",
+        "psutil._common",
         # ── Local modules ──
         "scraper",
         "config",

@@ -73,6 +73,27 @@ echo "Removing quarantine flag from .app bundle..."
 xattr -cr "dist/AmazonScraper.app" 2>/dev/null || true
 echo "[OK] Quarantine flag removed"
 
+# ── 7b. Ad-hoc code signing (REQUIRED on macOS 12+ and all Apple Silicon) ─────
+#  macOS LaunchServices error -47 (errFSBusyError) is caused by a missing code
+#  signature. "-" means ad-hoc (self-signed) — no Apple Developer account needed.
+#  This is sufficient for local/vendor distribution. For App Store or
+#  notarization, a paid Apple Developer certificate is required.
+echo ""
+echo "Applying ad-hoc code signature..."
+if command -v codesign &>/dev/null; then
+    codesign --force --deep --sign - "dist/AmazonScraper.app" 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "[OK] Ad-hoc code signature applied"
+        codesign --verify --verbose "dist/AmazonScraper.app" 2>&1 | head -3
+    else
+        echo "[WARN] codesign failed — app may show error -47 on macOS 12+"
+        echo "       Install Xcode Command Line Tools: xcode-select --install"
+    fi
+else
+    echo "[WARN] codesign not found — install Xcode Command Line Tools:"
+    echo "       xcode-select --install"
+fi
+
 # ── 8. Assemble distribution folder ──────────────────────────────────────────
 echo ""
 echo "Assembling distribution folder..."
