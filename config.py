@@ -21,7 +21,8 @@ PINCODES = {
 OUTPUT_FOLDER = "Desktop"
 
 # What to name the output file
-# {date} will be replaced with today's date automatically
+# {date} is replaced with the date and time of the run (e.g. 13May2026_143022)
+# Each run creates a NEW file — old reports are never overwritten
 OUTPUT_FILENAME = "Amazon_Report_{date}.xlsx"
 
 # ---- EMAIL SETTINGS (optional) ----

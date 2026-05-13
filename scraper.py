@@ -1029,6 +1029,19 @@ DELIVERY_SELECTORS = [
 
 
 def extract_delivery(driver: Chrome, logger: logging.Logger, wait_seconds: int = 8) -> str:
+    # Amazon's DEX unified CX widget stores the delivery time in a data attribute
+    # (data-csa-c-delivery-time) rather than visible text. Check this first — it
+    # gives a clean value like "Today 6 pm - 10 pm" without the surrounding noise.
+    try:
+        dex_els = driver.find_elements(By.CSS_SELECTOR, "span[data-csa-c-delivery-time]")
+        for dex_el in dex_els:
+            val = (dex_el.get_attribute("data-csa-c-delivery-time") or "").strip()
+            if val and any(c.isalpha() for c in val):
+                logger.debug(f"Delivery via DEX data-csa-c-delivery-time attr: {val!r}")
+                return val
+    except Exception:
+        pass
+
     for selector in DELIVERY_SELECTORS:
         try:
             el = WebDriverWait(driver, wait_seconds).until(
@@ -1408,7 +1421,7 @@ def get_desktop_path() -> Path:
 
 
 def resolve_output_path(settings: Dict[str, object]) -> Path:
-    date_tag = datetime.now().strftime("%d%b%Y")
+    date_tag = datetime.now().strftime("%d%b%Y_%H%M%S")
     filename = str(settings["OUTPUT_FILENAME"]).replace("{date}", date_tag)
 
     folder_raw = str(settings["OUTPUT_FOLDER"]).strip()
