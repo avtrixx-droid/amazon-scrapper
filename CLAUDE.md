@@ -200,80 +200,23 @@ Call `acquire_lock()` as the very first action in `main()`, before any other set
 
 ---
 
-### ISSUE 3: Delivery Date Incorrect / Missing
+### ISSUE 3: Delivery Date Incorrect / Missing — FIXED
 
-**Root cause:** Amazon's delivery date widget is dynamically injected by JavaScript AFTER the
-initial page load. Standard `find_element` fires before the widget renders.
+**Root cause (original):** Amazon's buy box is a multi-row accordion — each row is a different
+fulfillment channel (Amazon Now/ALM, Standard/MIR, Scheduled). The old code used a single
+selector waterfall and returned the first match, which was always the Standard/MIR row. The
+faster Amazon Now row (minutes/hours delivery) was never checked. Additionally, after changing
+pincode, the delivery widget refreshes via Ajax — the old `time.sleep(1.5)` wasn't long enough,
+so all pincodes showed the first pincode's delivery date (stale-data copy bug).
 
-**Fix — explicit WebDriverWait with multiple selector fallbacks:**
-```python
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-
-DELIVERY_SELECTORS = [
-    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span",
-    "#deliveryMessageMirWidget span[data-csa-c-slot-id]",
-    "#ddmDeliveryMessage",
-    ".delivery-message span",
-    "[data-feature-name='delivery-message'] span",
-    "#contextualIngressPtLabel_deliveryShortLine",
-]
-
-def extract_delivery_date(driver, wait_seconds=8):
-    for selector in DELIVERY_SELECTORS:
-        try:
-            el = WebDriverWait(driver, wait_seconds).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-            )
-            text = el.text.strip()
-            if text and any(c.isalpha() for c in text):
-                return text
-        except Exception:
-            continue
-    # Last resort: full page source grep for delivery patterns
-    try:
-        source = driver.page_source
-        import re
-        match = re.search(
-            r'(Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^<]{0,40}',
-            source
-        )
-        if match:
-            return match.group(0).strip()
-    except Exception:
-        pass
-    return "Not Available"
-```
-
-**Additional fix:** After setting a new pincode, do NOT immediately scrape.
-Wait for the delivery block to reload:
-```python
-def set_pincode_and_wait(driver, pincode):
-    # ... set pincode via existing logic ...
-    # Wait for delivery block to refresh after pincode change
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.staleness_of(driver.find_element(By.CSS_SELECTOR,
-                "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE"))
-        )
-    except Exception:
-        time.sleep(3)  # Graceful fallback
-```
-
-**Also extract "Free Delivery" from the same block:**
-```python
-def extract_free_delivery(driver):
-    try:
-        block = driver.find_element(By.CSS_SELECTOR,
-            "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE")
-        text = block.text.lower()
-        if "free" in text or "₹0" in text:
-            return "Yes"
-        return "No"
-    except Exception:
-        return "N/A"
-```
+**Fix applied — `extract_all_delivery_options(driver, expected_pincode, logger)`:**
+- Reads ALL fulfillment channels: Amazon Now (ALM), Standard (MIR), DEX attribute
+- Verifies `#contextualIngressPtLabel_deliveryShortLine` shows the expected pincode BEFORE
+  reading any delivery text — prevents the stale-data copy bug across pincodes
+- Normalises all options to "minutes from now" and returns the earliest one
+- Falls back to page source regex if CSS selectors all miss
+- Output format: `"Amazon Now – 10 Min (Free)"` / `"Standard – Tomorrow, 14 May (Free)"`
+- Returns `"Not Available"` for OOS items (never blank/None)
 
 ---
 
@@ -436,7 +379,7 @@ Never overwrite a previous file. One file = one run. Always print path at the en
 | J | Seller | Seller name, default "Amazon" |
 | K | Rating | Numeric only (e.g. "4.2") |
 | L | Reviews | Count only, commas removed |
-| M | Delivery Date | Date text only, e.g. "Tomorrow, 16 Jan" |
+| M | Earliest Delivery | Earliest option across all fulfillment channels. Format: `"{Channel} – {Date/Time} ({Free/₹XX})"`. Examples: `"Amazon Now – 10 Min (Free)"`, `"Standard – Tomorrow, 14 May (Free)"`, `"Standard – Wednesday, 17 May (₹40)"`, `"Not Available"` for OOS. |
 | N | Free Delivery | "Yes" / "No" / "N/A" |
 | O+ | {Pincode} - {City} | One column per pincode — availability + delivery |
 | Z | Scraped At | "15 Jan 2024, 09:00 PM" |
@@ -627,7 +570,7 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 |---|---|---|
 | ~35 GB disk on Mac | Chrome temp dirs never cleaned up | `tempfile.mkdtemp` + `shutil.rmtree` in `atexit` + signal handlers |
 | "Already running" on reload | No lock file | PID lock with stale-lock detection via `psutil` |
-| Delivery date wrong/missing | JavaScript renders AFTER page load | `WebDriverWait` with 8s timeout + selector waterfall + page source regex fallback |
+| Delivery date wrong/missing + copy bug across pincodes | (1) Only Standard/MIR row was read — Amazon Now (faster) never checked. (2) Stale Ajax data read immediately after pincode change — all pincodes showed same date. | `extract_all_delivery_options()` reads ALL fulfillment channels, picks earliest; verifies `#contextualIngressPtLabel_deliveryShortLine` shows new pincode before reading delivery |
 | Slow speed | Headed mode + fixed sleeps + no timeout | `--headless=new` + block images + `set_page_load_timeout` + `WebDriverWait` |
 | Inconsistent behavior | Fixed sleeps, no page validation, no retry | Pre-scrape page validator + `@retry` decorator + exponential back-off |
 | ChromeDriver version mismatch | Chrome vs UC version drift | Auto-detect Chrome version, `version_main=`, clear cache on mismatch |

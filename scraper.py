@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1015,75 +1015,264 @@ def extract_availability(driver: Chrome, logger: logging.Logger) -> str:
         return "Check on Amazon"
 
 
-DELIVERY_SELECTORS = [
-    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span",
-    "#deliveryMessageMirWidget span[data-csa-c-slot-id]",
-    "#ddmDeliveryMessage",
-    ".delivery-message span",
-    "[data-feature-name='delivery-message'] span",
-    "#contextualIngressPtLabel_deliveryShortLine",
-    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
-    "#deliveryMessageMirWidget",
-    ".delivery-message",
+# ── Delivery channel selectors ────────────────────────────────────────────────
+# Amazon buy box renders delivery as a multi-row accordion. Each row is a
+# different fulfillment channel. We must read ALL rows and pick the earliest.
+#
+# CHANNEL 1 — Amazon Now (ALM — Amazon Local Market)
+#   Identified by: data-csa-c-buying-option-type="ALM" on parent container
+#   Delivery message: #alm-delivery-message span
+#
+# CHANNEL 2 — Standard courier (MIR block)
+#   Delivery message: #mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span
+#
+# CHANNEL 3 — DEX unified widget (newer pages)
+#   Delivery time stored in data-csa-c-delivery-time attribute on span elements
+
+_DELIVERY_CHANNEL_SELECTORS = [
+    {
+        "channel": "Amazon Now",
+        "selectors": [
+            "#alm-delivery-message span.a-size-base",
+            "#alm-delivery-message span",
+            "#almLogoAndDeliveryMessage_feature_div .a-size-base",
+        ],
+        "keywords": ["minutes", "hours", "amazon now", "instant"],
+    },
+    {
+        "channel": "Standard",
+        "selectors": [
+            "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span[data-csa-c-slot-id]",
+            "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span",
+            "#deliveryMessageMirWidget span",
+            "#ddmDeliveryMessage",
+            ".delivery-message span",
+            "[data-feature-name='delivery-message'] span",
+        ],
+        "keywords": [
+            "tomorrow", "today", "monday", "tuesday", "wednesday",
+            "thursday", "friday", "saturday", "sunday",
+            "jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec", "day", "days",
+        ],
+    },
 ]
 
 
-def extract_delivery(driver: Chrome, logger: logging.Logger, wait_seconds: int = 8) -> str:
-    # Amazon's DEX unified CX widget stores the delivery time in a data attribute
-    # (data-csa-c-delivery-time) rather than visible text. Check this first — it
-    # gives a clean value like "Today 6 pm - 10 pm" without the surrounding noise.
+def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
+    """Convert delivery description to minutes-from-now for sorting (lower = earlier)."""
+    text = raw_text.lower().strip()
+
+    m = re.search(r"in\s+(\d+)\s+minute", text)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"in\s+(\d+)\s+hour", text)
+    if m:
+        return int(m.group(1)) * 60
+
+    if "today" in text:
+        return 24 * 60
+
+    if "tomorrow" in text:
+        return 48 * 60
+
+    m = re.search(r"in\s+(\d+)\s+day", text)
+    if m:
+        return int(m.group(1)) * 24 * 60
+
+    m = re.search(r"(\d+)-\d+\s+day", text)
+    if m:
+        return int(m.group(1)) * 24 * 60
+
+    WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    today_idx = datetime.today().weekday()
+    for idx, day in enumerate(WEEKDAYS):
+        if day in text:
+            days_ahead = (idx - today_idx) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            return days_ahead * 24 * 60
+
+    MONTHS = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    for abbr, month_num in MONTHS.items():
+        if abbr in text:
+            m = re.search(r"(\d{1,2})", text)
+            if m:
+                day_num = int(m.group(1))
+                try:
+                    target = date(date.today().year, month_num, day_num)
+                    delta = (target - date.today()).days
+                    if delta < 0:
+                        delta += 365
+                    return delta * 24 * 60
+                except ValueError:
+                    pass
+
+    return 999999
+
+
+def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
+    """Build a clean Excel-ready delivery string: 'Amazon Now – 10 min (Free)'."""
+    text = raw_text.strip()
+    text = re.sub(
+        r"^(free\s+delivery\s+in\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+)",
+        "", text, flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(r"\s+on orders over.*$", "", text, flags=re.IGNORECASE).strip()
+    text = text.title()
+    free_label = " (Free)" if is_free else ""
+    return f"{channel} – {text}{free_label}"
+
+
+def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: logging.Logger) -> dict:
+    """
+    Extract ALL delivery options from the product page and return the earliest.
+
+    Verifies the page has updated to expected_pincode before reading delivery
+    dates, preventing the stale-data bug where all pincodes show the same date.
+
+    Returns:
+        {
+            "earliest_display": str,   # goes in Excel col M
+            "is_free":          bool,  # goes in Excel col N
+            "all_options":      list,  # for debug logging
+            "pincode_verified": bool,  # logged only, not in Excel
+        }
+    """
+    result: dict = {
+        "earliest_display": "Not Available",
+        "is_free": False,
+        "all_options": [],
+        "pincode_verified": False,
+    }
+
+    # STEP A — Verify pincode updated on the product page.
+    # #contextualIngressPtLabel_deliveryShortLine shows "Deliver to  Mumbai 400001".
+    # We wait until the expected pincode number appears there before reading delivery.
+    try:
+        WebDriverWait(driver, 10).until(
+            lambda d: expected_pincode in
+            d.find_element(By.ID, "contextualIngressPtLabel_deliveryShortLine").text
+        )
+        result["pincode_verified"] = True
+        logger.debug(f"Pincode {expected_pincode} confirmed on product page.")
+    except Exception:
+        logger.warning(
+            f"Could not verify pincode {expected_pincode} on product page — "
+            f"falling back to 3s sleep. Delivery dates may be inaccurate."
+        )
+        time.sleep(3)
+
+    # STEP B — Check DEX unified widget (newer pages store date in data attribute).
     try:
         dex_els = driver.find_elements(By.CSS_SELECTOR, "span[data-csa-c-delivery-time]")
         for dex_el in dex_els:
             val = (dex_el.get_attribute("data-csa-c-delivery-time") or "").strip()
             if val and any(c.isalpha() for c in val):
-                logger.debug(f"Delivery via DEX data-csa-c-delivery-time attr: {val!r}")
-                return val
+                is_free = "free" in val.lower()
+                result["all_options"].append({
+                    "channel": "Standard",
+                    "raw_text": val,
+                    "display_text": _build_delivery_display("Standard", val, is_free),
+                    "sort_minutes": _normalise_delivery_to_minutes("Standard", val),
+                    "is_free": is_free,
+                })
+                logger.debug(f"DEX delivery attr: {val!r}")
     except Exception:
         pass
 
-    for selector in DELIVERY_SELECTORS:
-        try:
-            el = WebDriverWait(driver, wait_seconds).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-            )
-            text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
-            if text and any(c.isalpha() for c in text):
-                logger.debug(f"Delivery via {selector}: {text[:80]!r}")
-                return text
-        except Exception:
+    # STEP C — Try each fulfillment channel via CSS selectors.
+    for channel_def in _DELIVERY_CHANNEL_SELECTORS:
+        channel_name = channel_def["channel"]
+        raw_text = None
+
+        for selector in channel_def["selectors"]:
+            try:
+                el = WebDriverWait(driver, 5).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
+                if not text:
+                    continue
+                if any(kw in text.lower() for kw in channel_def["keywords"]):
+                    raw_text = text
+                    break
+            except Exception:
+                continue
+
+        if not raw_text:
+            logger.debug(f"No delivery text for channel: {channel_name}")
             continue
-        wait_seconds = 1  # first selector gets full wait; rest get 1s to avoid stalling
-    # Last resort: page source scan for day-of-week or date patterns
-    try:
-        source = driver.page_source
-        match = re.search(
-            r"(Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^<]{0,40}",
-            source,
+
+        is_free = any(w in raw_text.lower() for w in ["free", "₹0", "no charge"])
+        option = {
+            "channel": channel_name,
+            "raw_text": raw_text,
+            "display_text": _build_delivery_display(channel_name, raw_text, is_free),
+            "sort_minutes": _normalise_delivery_to_minutes(channel_name, raw_text),
+            "is_free": is_free,
+        }
+        result["all_options"].append(option)
+        logger.debug(f"Delivery option found: {option}")
+
+    # STEP D — Page source fallback when both channels miss.
+    if not result["all_options"]:
+        try:
+            source = driver.page_source
+            m = re.search(r"(FREE delivery in \d+ minutes[^\"<]{0,60})", source, re.IGNORECASE)
+            if m:
+                raw = m.group(1).strip()
+                result["all_options"].append({
+                    "channel": "Amazon Now",
+                    "raw_text": raw,
+                    "display_text": _build_delivery_display("Amazon Now", raw, True),
+                    "sort_minutes": _normalise_delivery_to_minutes("Amazon Now", raw),
+                    "is_free": True,
+                })
+            m = re.search(
+                r"((?:Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+                r"[^\"<\n]{0,50})",
+                source, re.IGNORECASE,
+            )
+            if m:
+                raw = m.group(1).strip()
+                is_free = "free" in raw.lower()
+                result["all_options"].append({
+                    "channel": "Standard",
+                    "raw_text": raw,
+                    "display_text": _build_delivery_display("Standard", raw, is_free),
+                    "sort_minutes": _normalise_delivery_to_minutes("Standard", raw),
+                    "is_free": is_free,
+                })
+        except Exception as e:
+            logger.warning(f"Page source delivery fallback failed: {e}")
+
+    # STEP E — Pick the earliest option.
+    if result["all_options"]:
+        # Deduplicate by channel (keep first occurrence after sort — DEX + CSS may overlap)
+        seen_channels: set = set()
+        unique_options = []
+        for opt in result["all_options"]:
+            if opt["channel"] not in seen_channels:
+                seen_channels.add(opt["channel"])
+                unique_options.append(opt)
+        result["all_options"] = unique_options
+
+        result["all_options"].sort(key=lambda x: x["sort_minutes"])
+        earliest = result["all_options"][0]
+        result["earliest_display"] = earliest["display_text"]
+        result["is_free"] = earliest["is_free"]
+        logger.debug(
+            f"Earliest delivery: {earliest['display_text']} "
+            f"({earliest['sort_minutes']} min) | "
+            f"All: {[o['display_text'] for o in result['all_options']]}"
         )
-        if match:
-            return match.group(0).strip()
-    except Exception:
-        pass
-    return "Not Available"
 
-
-def extract_free_delivery(driver: Chrome, logger: logging.Logger) -> str:
-    page = ""
-    try:
-        page = (driver.page_source or "").lower()
-    except Exception:
-        page = ""
-    if "free delivery" in page or "free" in safe_get_text(
-        driver,
-        [
-            (By.CSS_SELECTOR, "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE"),
-            (By.CSS_SELECTOR, "#ddmDeliveryMessage"),
-        ],
-        logger,
-    ).lower():
-        return "Yes"
-    return "No" if page else "N/A"
+    return result
 
 
 def extract_product_name(driver: Chrome, logger: logging.Logger) -> str:
@@ -1296,8 +1485,15 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
     price = extract_price(driver, logger)
     discount = compute_discount(mrp, price)
     availability = extract_availability(driver, logger)
-    delivery = extract_delivery(driver, logger)
-    free_delivery = extract_free_delivery(driver, logger)
+    delivery_result = extract_all_delivery_options(driver, pincode, logger)
+    delivery = delivery_result["earliest_display"]
+    free_delivery = "Yes" if delivery_result["is_free"] else "No"
+    if not delivery_result["pincode_verified"]:
+        logger.warning(f"[{asin}][{pincode}] Delivery read without pincode confirmation — data may be stale.")
+    logger.debug(
+        f"[{asin}][{pincode}] Delivery options: "
+        f"{[o['display_text'] for o in delivery_result['all_options']]}"
+    )
     seller = extract_seller(driver, logger)
     rating = extract_rating(driver, logger)
     reviews = extract_review_count(driver, logger)
