@@ -392,7 +392,8 @@ USER_AGENTS = [
 ]
 
 
-def detect_chrome_major_version(logger: logging.Logger) -> Optional[int]:
+def detect_chrome_major_version(logger: logging.Logger) -> tuple[Optional[int], Optional[str]]:
+    """Returns (major_version, chrome_exe_path). Either can be None on failure."""
     candidates: List[str] = []
     if sys.platform == "darwin":
         candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -401,10 +402,36 @@ def detect_chrome_major_version(logger: logging.Logger) -> Optional[int]:
             [
                 os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
                 os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
             ]
         )
     else:
         candidates.extend(["google-chrome", "chrome", "chromium", "chromium-browser"])
+
+    # On Windows, try the registry first — more reliable than subprocess in frozen/PyInstaller envs
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for reg_path in (
+                    r"Software\Google\Chrome\BLBeacon",
+                    r"Software\Wow6432Node\Google\Chrome\BLBeacon",
+                ):
+                    try:
+                        key = winreg.OpenKey(hive, reg_path)
+                        version, _ = winreg.QueryValueEx(key, "version")
+                        winreg.CloseKey(key)
+                        m = re.search(r"(\d+)\.", str(version))
+                        if m:
+                            major = int(m.group(1))
+                            logger.debug(f"Registry Chrome version: {version!r} -> major={major}")
+                            # Find the exe path to pass to UC
+                            exe_path = next((p for p in candidates if os.path.isfile(p)), None)
+                            return major, exe_path
+                    except OSError:
+                        continue
+        except ImportError:
+            pass
 
     for exe in candidates:
         try:
@@ -413,12 +440,12 @@ def detect_chrome_major_version(logger: logging.Logger) -> Optional[int]:
             if m:
                 major = int(m.group(1))
                 logger.debug(f"Detected Chrome version output: {out!r} -> major={major}")
-                return major
+                return major, exe
         except Exception:
             continue
 
     logger.debug("Could not detect Chrome major version")
-    return None
+    return None, None
 
 
 def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_id: int = 0) -> Chrome:
@@ -455,13 +482,16 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     def start_uc() -> Chrome:
-        chrome_major = detect_chrome_major_version(logger)
-        return uc.Chrome(
+        chrome_major, chrome_exe = detect_chrome_major_version(logger)
+        kwargs: dict = dict(
             options=options,
             use_subprocess=True,
             user_data_dir=str(profile_dir),
             version_main=chrome_major,
         )
+        if chrome_exe:
+            kwargs["browser_executable_path"] = chrome_exe
+        return uc.Chrome(**kwargs)
 
     try:
         driver = start_uc()
