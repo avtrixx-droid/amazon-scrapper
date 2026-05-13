@@ -1,17 +1,23 @@
+import atexit
 import json
 import logging
 import os
 import random
 import re
+import shutil
+import signal
 import smtplib
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import psutil
 
 import undetected_chromedriver as uc
 from openpyxl import Workbook, load_workbook
@@ -29,6 +35,10 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 import config
+
+# Module-level state — reachable by atexit and signal handlers
+CHROME_TEMP_DIR: Optional[str] = None
+LOCK_FILE: Optional[Path] = None
 
 
 # =====================================================
@@ -92,6 +102,110 @@ def ensure_folders(base_dir: Path) -> Dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_dir.mkdir(parents=True, exist_ok=True)
     return {"logs": logs_dir, "output": output_dir, "progress": progress_dir}
+
+
+# =====================================================
+# Chrome temp dir lifecycle (ISSUE 1 fix)
+# =====================================================
+
+
+def cleanup_chrome_temp() -> None:
+    global CHROME_TEMP_DIR
+    if CHROME_TEMP_DIR and os.path.exists(CHROME_TEMP_DIR):
+        try:
+            shutil.rmtree(CHROME_TEMP_DIR, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def cleanup_old_chrome_dirs() -> None:
+    """Delete amzscraper_chrome_* temp dirs older than 24 hours from the system temp folder."""
+    try:
+        tmp = Path(tempfile.gettempdir())
+        cutoff = time.time() - 86400  # 24 hours
+        for d in tmp.glob("amzscraper_chrome_*"):
+            try:
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+# =====================================================
+# PID lock file (ISSUE 2 fix)
+# =====================================================
+
+
+def acquire_lock(base_dir: Path) -> None:
+    global LOCK_FILE
+    LOCK_FILE = base_dir / ".scraper.lock"
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            if psutil.pid_exists(pid):
+                print(f"\nThe scraper is already running (process {pid}).")
+                print("Close the other terminal window first, then try again.")
+                sys.exit(1)
+            else:
+                LOCK_FILE.unlink()
+        except (ValueError, OSError):
+            try:
+                LOCK_FILE.unlink()
+            except Exception:
+                pass
+    LOCK_FILE.write_text(str(os.getpid()))
+    atexit.register(release_lock)
+
+
+def release_lock() -> None:
+    global LOCK_FILE
+    try:
+        if LOCK_FILE and LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+    except OSError:
+        pass
+
+
+# =====================================================
+# Signal handlers (ISSUE 1 + 2 fix)
+# =====================================================
+
+# These are set up inside main() so save_progress can be referenced
+_signal_progress_state: Dict = {}
+
+
+def _handle_exit_signal(signum, frame) -> None:
+    state = _signal_progress_state
+    try:
+        if state.get("progress_dir") and state.get("completed_list") is not None:
+            save_progress(state["progress_dir"], state.get("done_counter", 0), state["completed_list"])
+    except Exception:
+        pass
+    cleanup_chrome_temp()
+    release_lock()
+    sys.exit(0)
+
+
+# =====================================================
+# Log cleanup
+# =====================================================
+
+
+def cleanup_old_logs(logs_dir: Path, keep_days: int = 30) -> None:
+    """Delete log files older than keep_days days; keep at most the 30 most recent."""
+    try:
+        cutoff = time.time() - keep_days * 86400
+        logs = sorted(logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for i, log in enumerate(logs):
+            if i >= 30 or log.stat().st_mtime < cutoff:
+                try:
+                    log.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 # =====================================================
@@ -449,8 +563,10 @@ def detect_chrome_major_version(logger: logging.Logger) -> tuple[Optional[int], 
 
 
 def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_id: int = 0) -> Chrome:
-    width = random.randint(1024, 1920)
-    height = random.randint(700, 1080)
+    global CHROME_TEMP_DIR
+
+    width = random.randint(1280, 1920)
+    height = random.randint(800, 1080)
     ua = random.choice(USER_AGENTS)
 
     options = uc.ChromeOptions()
@@ -463,6 +579,21 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    # Memory limits
+    options.add_argument("--memory-pressure-off")
+    options.add_argument("--js-flags=--max-old-space-size=512")
+    # Block images to save bandwidth and speed up page loads
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    try:
+        options.add_experimental_option("prefs", {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.managed_default_content_settings.media_stream": 2,
+        })
+    except Exception:
+        pass  # add_experimental_option may not be supported in all UC versions
 
     if headless:
         options.add_argument("--headless=new")
@@ -477,16 +608,18 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
     except Exception:
         logger.debug("Could not override undetected-chromedriver cache path (non-fatal)")
 
-    profile_suffix = f"_{worker_id}" if worker_id else ""
-    profile_dir = (base_dir / "progress" / f"chrome_profile{profile_suffix}").resolve()
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    # Use a fresh temp dir per run so Chrome never accumulates state across runs (ISSUE 1)
+    temp_dir = tempfile.mkdtemp(prefix="amzscraper_chrome_")
+    if worker_id == 0:
+        CHROME_TEMP_DIR = temp_dir
+        atexit.register(cleanup_chrome_temp)
 
     def start_uc() -> Chrome:
         chrome_major, chrome_exe = detect_chrome_major_version(logger)
         kwargs: dict = dict(
             options=options,
             use_subprocess=True,
-            user_data_dir=str(profile_dir),
+            user_data_dir=temp_dir,
             version_main=chrome_major,
         )
         if chrome_exe:
@@ -496,6 +629,7 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
     try:
         driver = start_uc()
     except WebDriverException as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         msg = str(e).lower()
         logger.exception("WebDriver failed to start")
         if "chrome binary" in msg or "chrome not reachable" in msg or "cannot find chrome" in msg:
@@ -513,13 +647,21 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
                             if p.is_file():
                                 p.unlink()
                             else:
-                                import shutil
-
                                 shutil.rmtree(p, ignore_errors=True)
                         except Exception:
                             pass
                 logger.debug("Cleared uc_cache after version mismatch; retrying once")
-                driver = start_uc()
+                retry_dir = tempfile.mkdtemp(prefix="amzscraper_chrome_")
+                if worker_id == 0:
+                    CHROME_TEMP_DIR = retry_dir
+                options_retry = options
+                kwargs_retry: dict = dict(
+                    options=options_retry,
+                    use_subprocess=True,
+                    user_data_dir=retry_dir,
+                    version_main=detect_chrome_major_version(logger)[0],
+                )
+                driver = uc.Chrome(**kwargs_retry)
                 return driver
             except Exception:
                 logger.debug("Retry after cache clear failed")
@@ -540,12 +682,20 @@ def build_driver(headless: bool, logger: logging.Logger, base_dir: Path, worker_
             )
         friendly_exit("Could not start the browser. Please try again.")
     except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         logger.exception("Browser startup failed")
         friendly_exit(
             "Could not start the browser.\n"
             "Please check your internet connection and try again.\n"
             "If this is a work computer, security settings may be blocking the browser driver download."
         )
+
+    # Page and script load timeouts (ISSUE 4)
+    try:
+        driver.set_page_load_timeout(30)
+        driver.set_script_timeout(15)
+    except Exception:
+        logger.debug("Could not set page load timeout (non-fatal)")
 
     try:
         driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Kolkata"})
@@ -863,21 +1013,44 @@ def extract_availability(driver: Chrome, logger: logging.Logger) -> str:
         return "Check on Amazon"
 
 
-def extract_delivery(driver: Chrome, logger: logging.Logger) -> str:
-    txt = safe_get_text(
-        driver,
-        [
-            (By.CSS_SELECTOR, "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE"),
-            (By.CSS_SELECTOR, "#deliveryMessageMirWidget"),
-            (By.CSS_SELECTOR, ".delivery-message"),
-            (By.CSS_SELECTOR, "#ddmDeliveryMessage"),
-        ],
-        logger,
-    )
-    if txt == "Not Found":
-        return "Set pincode manually"
-    cleaned = re.sub(r"\s+", " ", txt).strip()
-    return cleaned
+DELIVERY_SELECTORS = [
+    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span",
+    "#deliveryMessageMirWidget span[data-csa-c-slot-id]",
+    "#ddmDeliveryMessage",
+    ".delivery-message span",
+    "[data-feature-name='delivery-message'] span",
+    "#contextualIngressPtLabel_deliveryShortLine",
+    "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
+    "#deliveryMessageMirWidget",
+    ".delivery-message",
+]
+
+
+def extract_delivery(driver: Chrome, logger: logging.Logger, wait_seconds: int = 8) -> str:
+    for selector in DELIVERY_SELECTORS:
+        try:
+            el = WebDriverWait(driver, wait_seconds).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+            )
+            text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
+            if text and any(c.isalpha() for c in text):
+                logger.debug(f"Delivery via {selector}: {text[:80]!r}")
+                return text
+        except Exception:
+            continue
+        wait_seconds = 1  # first selector gets full wait; rest get 1s to avoid stalling
+    # Last resort: page source scan for day-of-week or date patterns
+    try:
+        source = driver.page_source
+        match = re.search(
+            r"(Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^<]{0,40}",
+            source,
+        )
+        if match:
+            return match.group(0).strip()
+    except Exception:
+        pass
+    return "Not Available"
 
 
 def extract_free_delivery(driver: Chrome, logger: logging.Logger) -> str:
@@ -1014,6 +1187,52 @@ def random_backoff(seconds_min: int, seconds_max: int) -> None:
     time.sleep(random.uniform(seconds_min, seconds_max))
 
 
+def wait_for_product_page(driver: Chrome, timeout: int = 20) -> bool:
+    """Wait until #productTitle is visible — avoids fixed sleep after navigation."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.visibility_of_element_located((By.ID, "productTitle"))
+        )
+        return True
+    except Exception:
+        return False
+
+
+def validate_page_is_product(driver: Chrome, asin: str) -> str:
+    """Return 'OK', 'CAPTCHA', 'NOT_FOUND', 'WRONG_PAGE', or 'INCOMPLETE_LOAD'."""
+    try:
+        url = driver.current_url or ""
+        source_sample = (driver.page_source or "")[:3000].lower()
+    except Exception:
+        return "WRONG_PAGE"
+
+    if "captcha" in source_sample or "robot check" in source_sample or "captcha" in url.lower():
+        return "CAPTCHA"
+    if "page not found" in source_sample or "404" in url:
+        return "NOT_FOUND"
+    if asin.lower() not in source_sample:
+        return "WRONG_PAGE"
+    if "add to cart" not in source_sample and "out of stock" not in source_sample:
+        return "INCOMPLETE_LOAD"
+    return "OK"
+
+
+_SCRAPE_COUNT = 0
+
+
+def check_browser_health(driver: Chrome, logger: logging.Logger) -> bool:
+    """Return False (and log) if the browser has crashed; check every 50 scrapes."""
+    global _SCRAPE_COUNT
+    _SCRAPE_COUNT += 1
+    if _SCRAPE_COUNT % 50 == 0:
+        try:
+            driver.current_url
+        except Exception:
+            logger.warning("Browser unresponsive — needs restart")
+            return False
+    return True
+
+
 def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: logging.Logger) -> ScrapeResult:
     url = asin_url(asin)
     scraped_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -1021,7 +1240,12 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
     logger.debug(f"Visiting URL: {url}")
     driver.get(url)
 
-    if detect_captcha(driver):
+    # Wait for product title to appear (adaptive — no fixed sleep)
+    wait_for_product_page(driver, timeout=20)
+
+    # Validate the page before extracting
+    page_state = validate_page_is_product(driver, asin)
+    if page_state == "CAPTCHA" or detect_captcha(driver):
         return ScrapeResult(
             asin=asin,
             product_name="",
@@ -1042,8 +1266,15 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
             status="FAILED",
             failure_reason="CAPTCHA",
         )
-
-    time.sleep(random.uniform(2.0, 3.5))
+    if page_state == "NOT_FOUND":
+        return ScrapeResult(
+            asin=asin, product_name="Not Found", mrp=None, price=None,
+            discount_percent="N/A", pincode=pincode, city=city,
+            in_stock="Not Found", delivery_date="Not Available", free_delivery="N/A",
+            seller="", rating="", reviews="", bsr="N/A",
+            product_url=url, scraped_at=scraped_at, status="FAILED",
+            failure_reason="Product not found (404)",
+        )
 
     product_name = extract_product_name(driver, logger)
     mrp = extract_mrp(driver, logger)
@@ -1754,8 +1985,21 @@ def main() -> None:
 
     base_dir = Path(__file__).resolve().parent
     folders = ensure_folders(base_dir)
+
+    # Startup sequence per CLAUDE.md:
+    # 1. Clean up stale Chrome temp dirs older than 24h
+    cleanup_old_chrome_dirs()
+    # 2. Delete logs older than 30 days
+    cleanup_old_logs(folders["logs"])
+    # 3. Acquire PID lock — exits if another instance is already running
+    acquire_lock(base_dir)
+
     logger = setup_logging(folders["logs"])
     settings = validate_config()
+
+    # Register signal handlers so Ctrl+C and SIGTERM save progress and clean up
+    signal.signal(signal.SIGINT, _handle_exit_signal)
+    signal.signal(signal.SIGTERM, _handle_exit_signal)
 
     asin_entries = read_asins(base_dir / "asins.txt")
     pincodes = read_pincodes(base_dir)
@@ -1814,6 +2058,11 @@ def main() -> None:
     done_counter = len(completed_set)
     success_counter = 0
     failed_counter = 0
+
+    # Give signal handler access to live progress state
+    _signal_progress_state["progress_dir"] = folders["progress"]
+    _signal_progress_state["completed_list"] = completed_list
+    _signal_progress_state["done_counter"] = done_counter
 
     try:
         driver = build_driver(bool(settings["HEADLESS"]), logger, base_dir)
@@ -1934,6 +2183,7 @@ def main() -> None:
                     results_cache.setdefault(entry.asin, {})[pincode] = res
 
                 done_counter += 1
+                _signal_progress_state["done_counter"] = done_counter
                 completed_set.add(combo)
                 completed_list.append([entry.asin, pincode])
 
