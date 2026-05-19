@@ -1116,11 +1116,25 @@ _DELIVERY_CHANNEL_SELECTORS = [
             ".delivery-message span",
             "[data-feature-name='delivery-message'] span",
         ],
+        # BUG-FIX-FASTEST: SECONDARY slot was previously not read at all. Amazon shows
+        # "Or fastest delivery Tomorrow, …" as a sibling div of the PRIMARY slot. The
+        # SECONDARY date is often earlier than PRIMARY (paid same-day vs free standard).
+        # Confirmed against B0GS95NCTT (Mumbai 400001) on 2026-05-19:
+        #   PRIMARY:   "FREE delivery Thursday, 21 May on your first order. Details"
+        #   SECONDARY: "Or fastest delivery Tomorrow, 20 May. Order within 10 hrs 17 mins. Details"
+        # Both live inside #mir-layout-DELIVERY_BLOCK as sibling <div>s. The attribute
+        # selector [data-csa-c-slot-id='SECONDARY_…'] does NOT match — Amazon exposes
+        # the slot identity via element id only.
+        "fastest_selectors": [
+            "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE span",
+            "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_SMALL span",
+        ],
         "keywords": [
             "tomorrow", "today", "monday", "tuesday", "wednesday",
             "thursday", "friday", "saturday", "sunday",
             "jan", "feb", "mar", "apr", "may", "jun",
             "jul", "aug", "sep", "oct", "nov", "dec", "day", "days",
+            "fastest",  # BUG-FIX-FASTEST: SECONDARY slot text starts with "Or fastest delivery"
         ],
     },
 ]
@@ -1129,6 +1143,9 @@ _DELIVERY_CHANNEL_SELECTORS = [
 def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
     """Convert delivery description to minutes-from-now for sorting (lower = earlier)."""
     text = raw_text.lower().strip()
+    # BUG-FIX-FASTEST: Strip "Or fastest delivery" prefix from SECONDARY-slot text so
+    # the "tomorrow"/"today"/weekday checks below match correctly.
+    text = re.sub(r"^(or\s+)?fastest\s+delivery\s+", "", text).strip()
 
     m = re.search(r"in\s+(\d+)\s+minute", text)
     if m:
@@ -1138,11 +1155,16 @@ def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
     if m:
         return int(m.group(1)) * 60
 
+    # BUG-FIX-FASTEST: Previous values were off by one day, so "Tomorrow" (2880)
+    # tied with "Thursday in 2 days" (2880) and the SECONDARY slot lost the tie
+    # by insertion order. Corrected: "today" means ~0 min from now, "tomorrow"
+    # ~1 day (1440 min). The weekday and "in N days" branches below are already
+    # day-accurate, so this aligns them.
     if "today" in text:
-        return 24 * 60
+        return 0
 
     if "tomorrow" in text:
-        return 48 * 60
+        return 24 * 60
 
     m = re.search(r"in\s+(\d+)\s+day", text)
     if m:
@@ -1185,11 +1207,21 @@ def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
 def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
     """Build a clean Excel-ready delivery string: 'Amazon Now – 10 min (Free)'."""
     text = raw_text.strip()
+    # BUG-FIX-FASTEST: Strip "Or fastest delivery" / "Fastest delivery" prefix.
+    text = re.sub(r"^(or\s+)?fastest\s+delivery\s+", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(
-        r"^(free\s+delivery\s+in\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+)",
+        r"^(free\s+delivery\s+in\s+|free\s+delivery\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+)",
         "", text, flags=re.IGNORECASE,
     ).strip()
     text = re.sub(r"\s+on orders over.*$", "", text, flags=re.IGNORECASE).strip()
+    # BUG-FIX-FASTEST: Strip trailing noise that bleeds in from the slot's child
+    # elements (Details anchor, countdown span, "on your first order" condition,
+    # "Limited Period Offer" badge).
+    text = re.sub(r"\.\s*order within[\s\d\w]+", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"on\s+your\s+first\s+order\.?", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"limited\s+period\s+offer\.?", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\[?details\]?\.?\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s{2,}", " ", text).strip(" .,")
     text = text.title()
     free_label = " (Free)" if is_free else ""
     return f"{channel} – {text}{free_label}"
@@ -1240,7 +1272,11 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
         for dex_el in dex_els:
             val = (dex_el.get_attribute("data-csa-c-delivery-time") or "").strip()
             if val and any(c.isalpha() for c in val):
-                is_free = "free" in val.lower()
+                # BUG-FIX-FASTEST: Also read the sibling data-csa-c-delivery-price
+                # attribute so is_free reflects the real shipping cost rather than
+                # whether the date string happens to contain "free".
+                price_attr = (dex_el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
+                is_free = price_attr == "free" or "free" in val.lower()
                 result["all_options"].append({
                     "channel": "Standard",
                     "raw_text": val,
@@ -1248,7 +1284,7 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
                     "sort_minutes": _normalise_delivery_to_minutes("Standard", val),
                     "is_free": is_free,
                 })
-                logger.debug(f"DEX delivery attr: {val!r}")
+                logger.debug(f"DEX delivery attr: time={val!r} price={price_attr!r}")
     except Exception:
         pass
 
@@ -1271,20 +1307,49 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
             except Exception:
                 continue
 
-        if not raw_text:
-            logger.debug(f"No delivery text for channel: {channel_name}")
-            continue
+        if raw_text:
+            is_free = any(w in raw_text.lower() for w in ["free", "₹0", "no charge"])
+            option = {
+                "channel": channel_name,
+                "raw_text": raw_text,
+                "display_text": _build_delivery_display(channel_name, raw_text, is_free),
+                "sort_minutes": _normalise_delivery_to_minutes(channel_name, raw_text),
+                "is_free": is_free,
+            }
+            result["all_options"].append(option)
+            logger.debug(f"Delivery PRIMARY option: {option}")
+        else:
+            logger.debug(f"No PRIMARY delivery text for channel: {channel_name}")
 
-        is_free = any(w in raw_text.lower() for w in ["free", "₹0", "no charge"])
-        option = {
-            "channel": channel_name,
-            "raw_text": raw_text,
-            "display_text": _build_delivery_display(channel_name, raw_text, is_free),
-            "sort_minutes": _normalise_delivery_to_minutes(channel_name, raw_text),
-            "is_free": is_free,
-        }
-        result["all_options"].append(option)
-        logger.debug(f"Delivery option found: {option}")
+        # BUG-FIX-FASTEST: Read SECONDARY/"Or fastest delivery" slot as well.
+        # This is a sibling element (NOT an accordion row) inside the same MIR
+        # delivery block. Without this read, the slower PRIMARY date wins because
+        # the faster SECONDARY date is never seen. find_elements returns [] when
+        # the slot is missing — that's fine, no exception.
+        for selector in channel_def.get("fastest_selectors", []):
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for el in elements:
+                    text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
+                    if not text:
+                        continue
+                    if not any(kw in text.lower() for kw in channel_def["keywords"]):
+                        continue
+                    # Skip if we've already captured this exact text via PRIMARY/DEX
+                    if any(o["raw_text"] == text for o in result["all_options"]):
+                        continue
+                    is_free = any(w in text.lower() for w in ["free", "₹0", "no charge"])
+                    option = {
+                        "channel": channel_name,
+                        "raw_text": text,
+                        "display_text": _build_delivery_display(channel_name, text, is_free),
+                        "sort_minutes": _normalise_delivery_to_minutes(channel_name, text),
+                        "is_free": is_free,
+                    }
+                    result["all_options"].append(option)
+                    logger.debug(f"Delivery FASTEST option: {option}")
+            except Exception:
+                continue
 
     # STEP D — Page source fallback when both channels miss.
     if not result["all_options"]:
@@ -1320,12 +1385,18 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
 
     # STEP E — Pick the earliest option.
     if result["all_options"]:
-        # Deduplicate by channel (keep first occurrence after sort — DEX + CSS may overlap)
-        seen_channels: set = set()
+        # BUG-FIX-FASTEST: Dedup key was previously `channel`, which discarded the
+        # SECONDARY "Or fastest delivery" option whenever a PRIMARY Standard option
+        # had already been added (e.g. B0GS95NCTT — Tomorrow was dropped, Thursday
+        # was kept). Dedup by raw_text instead so distinct PRIMARY+SECONDARY texts
+        # both survive while genuine duplicates (DEX attr vs CSS read returning the
+        # same string) are still collapsed.
+        seen_texts: set = set()
         unique_options = []
         for opt in result["all_options"]:
-            if opt["channel"] not in seen_channels:
-                seen_channels.add(opt["channel"])
+            key = opt["raw_text"].strip().lower()
+            if key not in seen_texts:
+                seen_texts.add(key)
                 unique_options.append(opt)
         result["all_options"] = unique_options
 
