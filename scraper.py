@@ -471,8 +471,10 @@ def load_results_cache(progress_dir: Path) -> Dict[str, Dict[str, "ScrapeResult"
 # =====================================================
 
 
-def setup_logging(logs_dir: Path) -> logging.Logger:
-    date_tag = datetime.now().strftime("%d%b%Y")
+def setup_logging(logs_dir: Path, timestamp: Optional[str] = None) -> logging.Logger:
+    # BUG-FIX: Accept a pre-captured timestamp so Excel and log filenames share the same tag.
+    # BUG-FIX: Switched format to %Y%m%d_%H%M%S so log filename includes time component.
+    date_tag = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = logs_dir / f"scraper_{date_tag}.log"
 
     logger = logging.getLogger("amazon_scraper")
@@ -990,29 +992,94 @@ def extract_mrp(driver: Chrome, logger: logging.Logger) -> Optional[float]:
 
 
 def extract_availability(driver: Chrome, logger: logging.Logger) -> str:
-    txt = safe_get_text(
-        driver,
-        [
-            (By.CSS_SELECTOR, "#availability span"),
-            (By.CSS_SELECTOR, "#outOfStock"),
-            (By.CSS_SELECTOR, ".availRed"),
-            (By.CSS_SELECTOR, ".availGreen"),
-        ],
-        logger,
-    )
-    t = txt.lower()
-    if "in stock" in t:
-        return "In Stock"
-    if "out of stock" in t:
-        return "Out of Stock"
-    m = re.search(r"only\s+(\d+)\s+left", t)
-    if m:
-        return f"Low Stock ({m.group(1)} left)"
-    try:
-        driver.find_element(By.ID, "add-to-cart-button")
-        return "In Stock"
-    except Exception:
-        return "Check on Amazon"
+    """
+    Cross-check two Amazon availability signals.
+    Returns: "In Stock" | "Out of Stock" | "Low Stock (X left)" | "Unknown"
+
+    BUG-FIX: Previous code read only #availability span, which can say "In Stock"
+    even when no seller has an active offer. Now cross-checks with buy box state.
+    """
+
+    # BUG-FIX: Signal A — Catalog availability text (multi-selector waterfall)
+    AVAILABILITY_SELECTORS = [
+        "#availability span",
+        "#availabilityInsideBuyBox_feature_div span",
+        "#outOfStock span",
+        "#almAvailability_feature_div span.primary-availability-message",  # BUG-FIX: Amazon Now
+    ]
+    availability_text = ""  # BUG-FIX
+    for sel in AVAILABILITY_SELECTORS:  # BUG-FIX
+        try:  # BUG-FIX
+            el = driver.find_element(By.CSS_SELECTOR, sel)  # BUG-FIX
+            text = (el.text or el.get_attribute("textContent") or "").strip().lower()  # BUG-FIX
+            if text:  # BUG-FIX
+                availability_text = text  # BUG-FIX
+                break  # BUG-FIX
+        except Exception:  # BUG-FIX
+            continue  # BUG-FIX
+
+    # BUG-FIX: Signal B — Can the product actually be purchased right now?
+    BUY_BOX_ACTIVE_SELECTORS = [
+        "#add-to-cart-button",
+        "#buy-now-button",
+        "#freshAddToCartButton",          # BUG-FIX: Amazon Now Add to Cart
+        "input[name='submit.add-to-cart']",
+        "#submit.add-to-cart-ubb",
+    ]
+    buy_box_active = False  # BUG-FIX
+    for sel in BUY_BOX_ACTIVE_SELECTORS:  # BUG-FIX
+        try:  # BUG-FIX
+            el = driver.find_element(By.CSS_SELECTOR, sel)  # BUG-FIX
+            if el.is_displayed():  # BUG-FIX
+                buy_box_active = True  # BUG-FIX
+                break  # BUG-FIX
+        except Exception:  # BUG-FIX
+            continue  # BUG-FIX
+
+    # BUG-FIX: Signal C — Explicit "currently unavailable" phrases on page
+    UNAVAILABLE_PHRASES = [
+        "currently unavailable",
+        "not available",
+        "we don't know when or if",
+        "sign up to be notified",
+        "item under review",
+        "this item cannot be shipped",  # BUG-FIX: common for restricted products
+    ]
+    page_says_unavailable = False  # BUG-FIX
+    try:  # BUG-FIX
+        page_text = driver.find_element(By.ID, "availability").text.lower()  # BUG-FIX
+        page_says_unavailable = any(p in page_text for p in UNAVAILABLE_PHRASES)  # BUG-FIX
+    except Exception:  # BUG-FIX
+        pass  # BUG-FIX: Element missing is OK — handled by Signal B
+
+    logger.debug(  # BUG-FIX
+        f"Availability signals — text={availability_text!r} buy_box={buy_box_active} "  # BUG-FIX
+        f"unavailable_phrase={page_says_unavailable}"  # BUG-FIX
+    )  # BUG-FIX
+
+    # BUG-FIX: Rule 1 — Page explicitly says unavailable → Out of Stock
+    if page_says_unavailable:  # BUG-FIX
+        return "Out of Stock"  # BUG-FIX
+
+    # BUG-FIX: Rule 2 — No buy box button visible → Out of Stock (key fix)
+    if not buy_box_active:  # BUG-FIX
+        return "Out of Stock"  # BUG-FIX
+
+    # BUG-FIX: Rule 3 — Low stock indicator
+    if "only" in availability_text and "left" in availability_text:  # BUG-FIX
+        m = re.search(r'only (\d+) left', availability_text)  # BUG-FIX
+        if m:  # BUG-FIX
+            return f"Low Stock ({m.group(1)} left)"  # BUG-FIX
+
+    # BUG-FIX: Rule 4 — Both signals agree it's available
+    if "in stock" in availability_text and buy_box_active:  # BUG-FIX
+        return "In Stock"  # BUG-FIX
+
+    # BUG-FIX: Rule 5 — Ambiguous text but buy box present
+    if buy_box_active:  # BUG-FIX
+        return "In Stock"  # BUG-FIX
+
+    return "Out of Stock"  # BUG-FIX
 
 
 # ── Delivery channel selectors ────────────────────────────────────────────────
@@ -1402,6 +1469,66 @@ def wait_for_product_page(driver: Chrome, timeout: int = 20) -> bool:
         return False
 
 
+# BUG-FIX: Wait for page to confirm new pincode before reading delivery date.
+# Without this wait, the previous pincode's delivery date is still showing.
+def wait_for_pincode_confirmation(driver: Chrome, expected_pincode: str, timeout: int = 12) -> bool:
+    """
+    Block until Amazon's page confirms the new pincode is active.
+    Returns True if confirmed within timeout, False otherwise.
+
+    BUG-FIX: This is the core fix for delivery dates copying across pincodes.
+    The delivery block refreshes asynchronously — we must wait for it.
+    """
+    PINCODE_CONFIRMATION_SELECTORS = [  # BUG-FIX
+        "contextualIngressPtLabel_deliveryShortLine",  # BUG-FIX: primary (from live HTML)
+        "glow-ingress-line2",                          # BUG-FIX: fallback — header location text
+        "nav-global-location-data-modal-action",       # BUG-FIX: fallback — nav bar location
+    ]
+
+    for element_id in PINCODE_CONFIRMATION_SELECTORS:  # BUG-FIX
+        try:  # BUG-FIX
+            WebDriverWait(driver, timeout).until(  # BUG-FIX
+                lambda d, eid=element_id, pc=expected_pincode: (  # BUG-FIX
+                    pc in d.find_element(By.ID, eid).text  # BUG-FIX
+                )  # BUG-FIX
+            )  # BUG-FIX
+            logging.getLogger("amazon_scraper").debug(  # BUG-FIX
+                f"Pincode {expected_pincode} confirmed via #{element_id}"  # BUG-FIX
+            )  # BUG-FIX
+            return True  # BUG-FIX
+        except Exception:  # BUG-FIX
+            continue  # BUG-FIX: try next selector
+
+    logging.getLogger("amazon_scraper").warning(  # BUG-FIX
+        f"BUG-FIX WARNING: Could not confirm pincode {expected_pincode} on page. "  # BUG-FIX
+        f"Delivery date for this pincode may be inaccurate. "  # BUG-FIX
+        f"Falling back to 5s sleep."  # BUG-FIX
+    )  # BUG-FIX
+    time.sleep(5)  # BUG-FIX
+    return False  # BUG-FIX
+
+
+# BUG-FIX: Wait for delivery block to be present before extracting date.
+# Prevents reading a blank or stale delivery element on a fresh product page.
+def wait_for_delivery_block(driver: Chrome, timeout: int = 8) -> bool:
+    """Wait for at least one delivery element to be visible on the page."""
+    DELIVERY_PRESENCE_SELECTORS = [  # BUG-FIX
+        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",  # BUG-FIX
+        "#alm-delivery-message",  # BUG-FIX
+        "#ddmDeliveryMessage",  # BUG-FIX
+        "#deliveryMessageMirWidget",  # BUG-FIX
+    ]
+    for sel in DELIVERY_PRESENCE_SELECTORS:  # BUG-FIX
+        try:  # BUG-FIX
+            WebDriverWait(driver, timeout).until(  # BUG-FIX
+                EC.presence_of_element_located((By.CSS_SELECTOR, sel))  # BUG-FIX
+            )  # BUG-FIX
+            return True  # BUG-FIX
+        except Exception:  # BUG-FIX
+            continue  # BUG-FIX
+    return False  # BUG-FIX: caller proceeds with "Not Available"
+
+
 def validate_page_is_product(driver: Chrome, asin: str) -> str:
     """Return 'OK', 'CAPTCHA', 'NOT_FOUND', 'WRONG_PAGE', or 'INCOMPLETE_LOAD'."""
     try:
@@ -1446,6 +1573,9 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
 
     # Wait for product title to appear (adaptive — no fixed sleep)
     wait_for_product_page(driver, timeout=20)
+    # BUG-FIX: Wait for delivery block before any delivery extraction so we
+    # don't read a stale/blank element while Amazon's Ajax re-render is in flight.
+    wait_for_delivery_block(driver)  # BUG-FIX
 
     # Validate the page before extracting
     page_state = validate_page_is_product(driver, asin)
@@ -1616,8 +1746,10 @@ def get_desktop_path() -> Path:
     return home / "Desktop"
 
 
-def resolve_output_path(settings: Dict[str, object]) -> Path:
-    date_tag = datetime.now().strftime("%d%b%Y_%H%M%S")
+def resolve_output_path(settings: Dict[str, object], timestamp: Optional[str] = None) -> Path:
+    # BUG-FIX: Accept a pre-captured timestamp so Excel and log filenames share the same tag.
+    # BUG-FIX: Switched format to %Y%m%d_%H%M%S per spec (e.g. 20240514_143022).
+    date_tag = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = str(settings["OUTPUT_FILENAME"]).replace("{date}", date_tag)
 
     folder_raw = str(settings["OUTPUT_FOLDER"]).strip()
@@ -2059,6 +2191,13 @@ def run_worker(
         for pincode, city in pincodes.items():
             time.sleep(random.uniform(float(settings["MIN_DELAY"]), float(settings["MAX_DELAY"])))
             ok = set_pincode(driver, pincode, city, logger)
+            # BUG-FIX: Confirm pincode applied before scraping ASINs — fixes delivery date copy bug
+            if ok:  # BUG-FIX
+                confirmed = wait_for_pincode_confirmation(driver, pincode)  # BUG-FIX
+                if not confirmed:  # BUG-FIX
+                    qput({"type": "progress", "worker": worker_id, "done": done,  # BUG-FIX
+                          "total": total_combos, "status": "WARN",  # BUG-FIX
+                          "msg": f"⚠️  W{worker_id} Pincode {pincode} ({city}) not confirmed — dates may be wrong"})  # BUG-FIX
 
             if not ok:
                 ts = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -2219,6 +2358,10 @@ def main() -> None:
 
     print_header()
 
+    # BUG-FIX: Capture run timestamp ONCE at startup so Excel filename and log
+    # filename share the same tag, and so two runs in the same minute don't collide.
+    RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")  # BUG-FIX
+
     base_dir = Path(__file__).resolve().parent
     folders = ensure_folders(base_dir)
 
@@ -2230,7 +2373,7 @@ def main() -> None:
     # 3. Acquire PID lock — exits if another instance is already running
     acquire_lock(base_dir)
 
-    logger = setup_logging(folders["logs"])
+    logger = setup_logging(folders["logs"], timestamp=RUN_TIMESTAMP)  # BUG-FIX
     settings = validate_config()
 
     # Register signal handlers so Ctrl+C and SIGTERM save progress and clean up
@@ -2272,7 +2415,7 @@ def main() -> None:
     if resume:
         results_cache = load_results_cache(folders["progress"])
 
-    xlsx_path = resolve_output_path(settings)
+    xlsx_path = resolve_output_path(settings, timestamp=RUN_TIMESTAMP)  # BUG-FIX
 
     started_at = datetime.now()
 
@@ -2307,6 +2450,11 @@ def main() -> None:
         for pincode, city in pincodes.items():
             human_delay(settings)
             ok = set_pincode(driver, pincode, city, logger)
+            # BUG-FIX: Added confirmation wait — this is what fixes date copying across pincodes
+            if ok:  # BUG-FIX
+                confirmed = wait_for_pincode_confirmation(driver, pincode)  # BUG-FIX
+                if not confirmed:  # BUG-FIX
+                    print(f"⚠️  Pincode {pincode} ({city}) may not have applied — delivery dates may be wrong.")  # BUG-FIX
             if not ok:
                 # Mark all ASINs for this pincode as failed
                 for entry in asin_entries:
