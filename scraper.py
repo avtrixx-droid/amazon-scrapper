@@ -1242,12 +1242,18 @@ def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Opt
     deliveries. The caller sorts by this directly — no minute-bucketing.
 
     Strategy in order of confidence:
-      1. Durations  ("in 10 minutes" / "in 2 hours")
-      2. Day spans  ("in 3 days" / "2-3 days")
+      1. Durations  ("in 10 minutes" / "10 Minutes" / "2 hours")
+      2. Day spans  ("in 3 days" / "2-3 days" / "3 Days")
       3. Explicit dates ("20 May" / "May 20") — most precise, tried before
          "tomorrow" so "Tomorrow, 20 May" lands on the actual 20th.
       4. Relative  ("today" / "tomorrow")
       5. Weekday names ("Thursday")
+
+    Note: durations and day-counts match WITH OR WITHOUT a leading "in" because
+    `_pick_earliest_result` re-parses the display string ("Amazon Now – 10
+    Minutes (Free)") where `_build_delivery_display` already stripped the
+    "free delivery in " prefix. Requiring "in" here would silently drop
+    Amazon Now options from the global earliest pick.
     """
     if not raw_text:
         return None
@@ -1257,21 +1263,33 @@ def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Opt
 
     t = _strip_delivery_noise(raw_text.lower())
 
-    # 1. Durations
-    m = re.search(r"in\s+(\d+)\s+minute", t)
+    # 1. Durations — bare or "in N <unit>"
+    m = re.search(r"\b(\d+)\s+minute", t)
     if m:
         return now + timedelta(minutes=int(m.group(1)))
-    m = re.search(r"in\s+(\d+)\s+hour", t)
+    m = re.search(r"\b(\d+)\s+hour", t)
     if m:
         return now + timedelta(hours=int(m.group(1)))
 
-    # 2. Day spans
-    m = re.search(r"in\s+(\d+)\s+day", t)
-    if m:
-        return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
+    # 2. Day spans — range first ("2-3 days" → low bound), then bare/in-prefixed
     m = re.search(r"(\d+)\s*-\s*\d+\s+day", t)
     if m:
         return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
+    m = re.search(r"\b(\d+)\s+day", t)
+    if m:
+        return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
+
+    # 2b. Date ranges with month ("8-9 May") — pick the LOW end. Without this,
+    # Step 3's single-date regex eats only the second number and we'd silently
+    # report the slower end of the window.
+    m = re.search(
+        r"\b(\d{1,2})\s*-\s*\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+        t,
+    )
+    if m:
+        dt = _resolve_month_day(now, _MONTHS[m.group(2)], int(m.group(1)))
+        if dt:
+            return dt
 
     # 3. Explicit date — try BEFORE "tomorrow"/weekday so a phrase like
     #    "Tomorrow, 20 May" lands on May 20 even if today isn't quite May 19.
