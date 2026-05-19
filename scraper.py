@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1140,68 +1140,130 @@ _DELIVERY_CHANNEL_SELECTORS = [
 ]
 
 
+_DELIVERY_NOISE_RE = re.compile(
+    r"^(or\s+)?fastest\s+delivery\s+"
+    # Don't strip the "in" / "by" that follows "delivery" — the duration and
+    # date parsers need it ("FREE delivery in 10 minutes" -> "in 10 minutes").
+    r"|^free\s+delivery\s+"
+    r"|^get\s+it\s+(by\s+)?"
+    r"|^delivery\s+by\s+"
+    r"|\.\s*order\s+within[\s\d\w]+"
+    r"|on\s+your\s+first\s+order\.?"
+    r"|limited\s+period\s+offer\.?"
+    r"|\[?details\]?",
+    re.IGNORECASE,
+)
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_WEEKDAYS = [
+    "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+]
+
+
+def _strip_delivery_noise(text: str) -> str:
+    """Strip Amazon's prefixes/suffixes so the bare date phrase is left."""
+    cleaned = _DELIVERY_NOISE_RE.sub("", text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" .,")
+
+
+def _resolve_month_day(now: datetime, month: int, day: int) -> Optional[datetime]:
+    """Place a (month, day) onto a concrete year — current, or next when more
+    than ~60 days in the past so a Jan date seen in Dec rolls forward correctly."""
+    try:
+        candidate = datetime(now.year, month, day, 12, 0)
+    except ValueError:
+        return None
+    if (candidate - now).days < -60:
+        try:
+            candidate = datetime(now.year + 1, month, day, 12, 0)
+        except ValueError:
+            return None
+    return candidate
+
+
+def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Convert a delivery phrase into a concrete delivery datetime.
+
+    Returns None if no date can be extracted. Earlier datetimes mean earlier
+    deliveries. The caller sorts by this directly — no minute-bucketing.
+
+    Strategy in order of confidence:
+      1. Durations  ("in 10 minutes" / "in 2 hours")
+      2. Day spans  ("in 3 days" / "2-3 days")
+      3. Explicit dates ("20 May" / "May 20") — most precise, tried before
+         "tomorrow" so "Tomorrow, 20 May" lands on the actual 20th.
+      4. Relative  ("today" / "tomorrow")
+      5. Weekday names ("Thursday")
+    """
+    if not raw_text:
+        return None
+    if now is None:
+        now = datetime.now()
+    today = now.date()
+
+    t = _strip_delivery_noise(raw_text.lower())
+
+    # 1. Durations
+    m = re.search(r"in\s+(\d+)\s+minute", t)
+    if m:
+        return now + timedelta(minutes=int(m.group(1)))
+    m = re.search(r"in\s+(\d+)\s+hour", t)
+    if m:
+        return now + timedelta(hours=int(m.group(1)))
+
+    # 2. Day spans
+    m = re.search(r"in\s+(\d+)\s+day", t)
+    if m:
+        return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
+    m = re.search(r"(\d+)\s*-\s*\d+\s+day", t)
+    if m:
+        return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
+
+    # 3. Explicit date — try BEFORE "tomorrow"/weekday so a phrase like
+    #    "Tomorrow, 20 May" lands on May 20 even if today isn't quite May 19.
+    month_pat = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    m = re.search(rf"\b(\d{{1,2}})\s+{month_pat}\b", t)
+    if m:
+        dt = _resolve_month_day(now, _MONTHS[m.group(2)], int(m.group(1)))
+        if dt:
+            return dt
+    m = re.search(rf"\b{month_pat}\s+(\d{{1,2}})\b", t)
+    if m:
+        dt = _resolve_month_day(now, _MONTHS[m.group(1)], int(m.group(2)))
+        if dt:
+            return dt
+
+    # 4. Relative day
+    if re.search(r"\btomorrow\b", t):
+        return datetime.combine(today + timedelta(days=1), dt_time(12, 0))
+    if re.search(r"\btoday\b", t):
+        return datetime.combine(today, dt_time(12, 0))
+
+    # 5. Weekday name
+    today_idx = today.weekday()
+    for idx, name in enumerate(_WEEKDAYS):
+        if re.search(rf"\b{name}\b", t):
+            ahead = (idx - today_idx) % 7
+            if ahead == 0:
+                ahead = 7
+            return datetime.combine(today + timedelta(days=ahead), dt_time(12, 0))
+
+    return None
+
+
 def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
-    """Convert delivery description to minutes-from-now for sorting (lower = earlier)."""
-    text = raw_text.lower().strip()
-    # BUG-FIX-FASTEST: Strip "Or fastest delivery" prefix from SECONDARY-slot text so
-    # the "tomorrow"/"today"/weekday checks below match correctly.
-    text = re.sub(r"^(or\s+)?fastest\s+delivery\s+", "", text).strip()
-
-    m = re.search(r"in\s+(\d+)\s+minute", text)
-    if m:
-        return int(m.group(1))
-
-    m = re.search(r"in\s+(\d+)\s+hour", text)
-    if m:
-        return int(m.group(1)) * 60
-
-    # BUG-FIX-FASTEST: Previous values were off by one day, so "Tomorrow" (2880)
-    # tied with "Thursday in 2 days" (2880) and the SECONDARY slot lost the tie
-    # by insertion order. Corrected: "today" means ~0 min from now, "tomorrow"
-    # ~1 day (1440 min). The weekday and "in N days" branches below are already
-    # day-accurate, so this aligns them.
-    if "today" in text:
-        return 0
-
-    if "tomorrow" in text:
-        return 24 * 60
-
-    m = re.search(r"in\s+(\d+)\s+day", text)
-    if m:
-        return int(m.group(1)) * 24 * 60
-
-    m = re.search(r"(\d+)-\d+\s+day", text)
-    if m:
-        return int(m.group(1)) * 24 * 60
-
-    WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    today_idx = datetime.today().weekday()
-    for idx, day in enumerate(WEEKDAYS):
-        if day in text:
-            days_ahead = (idx - today_idx) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            return days_ahead * 24 * 60
-
-    MONTHS = {
-        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-    }
-    for abbr, month_num in MONTHS.items():
-        if abbr in text:
-            m = re.search(r"(\d{1,2})", text)
-            if m:
-                day_num = int(m.group(1))
-                try:
-                    target = date(date.today().year, month_num, day_num)
-                    delta = (target - date.today()).days
-                    if delta < 0:
-                        delta += 365
-                    return delta * 24 * 60
-                except ValueError:
-                    pass
-
-    return 999999
+    """Backward-compat shim: minutes-from-now for legacy callers/log lines.
+    The real sort is on the datetime returned by _parse_delivery_phrase."""
+    now = datetime.now()
+    dt = _parse_delivery_phrase(raw_text, now)
+    if dt is None:
+        return 999999
+    delta = int((dt - now).total_seconds() // 60)
+    return max(0, delta)
 
 
 def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
@@ -1266,32 +1328,55 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
         )
         time.sleep(3)
 
-    # STEP B — Check DEX unified widget (newer pages store date in data attribute).
+    # ROBUST-FIX: Build a delivery option from a raw phrase using the date-object
+    # parser. The same builder is used by every source (DEX attribute, structured
+    # slot CSS, fastest sibling slot, container-text scan, page-source regex) so
+    # all candidates are evaluated on the same, real datetime — no minute-bucket
+    # ties, no slot-priority bias, no keyword whack-a-mole.
+    now = datetime.now()
+
+    def _make_option(channel: str, raw_text: str, is_free: bool) -> Optional[dict]:
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            return None
+        dt = _parse_delivery_phrase(raw_text, now)
+        return {
+            "channel": channel,
+            "raw_text": raw_text,
+            "display_text": _build_delivery_display(channel, raw_text, is_free),
+            "delivery_dt": dt,
+            # Minutes-from-now kept for log readability; sort key is delivery_dt.
+            "sort_minutes": max(0, int((dt - now).total_seconds() // 60)) if dt else 999999,
+            "is_free": is_free,
+        }
+
+    def _add(opt: Optional[dict], source: str) -> None:
+        if not opt:
+            return
+        result["all_options"].append(opt)
+        logger.debug(
+            f"Delivery option [{source}]: {opt['display_text']!r} "
+            f"dt={opt['delivery_dt']} (raw={opt['raw_text']!r})"
+        )
+
+    # STEP B — DEX unified widget: each span carries a clean date in
+    # data-csa-c-delivery-time and the cost class in data-csa-c-delivery-price.
     try:
-        dex_els = driver.find_elements(By.CSS_SELECTOR, "span[data-csa-c-delivery-time]")
-        for dex_el in dex_els:
+        for dex_el in driver.find_elements(By.CSS_SELECTOR, "span[data-csa-c-delivery-time]"):
             val = (dex_el.get_attribute("data-csa-c-delivery-time") or "").strip()
-            if val and any(c.isalpha() for c in val):
-                # BUG-FIX-FASTEST: Also read the sibling data-csa-c-delivery-price
-                # attribute so is_free reflects the real shipping cost rather than
-                # whether the date string happens to contain "free".
-                price_attr = (dex_el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
-                is_free = price_attr == "free" or "free" in val.lower()
-                result["all_options"].append({
-                    "channel": "Standard",
-                    "raw_text": val,
-                    "display_text": _build_delivery_display("Standard", val, is_free),
-                    "sort_minutes": _normalise_delivery_to_minutes("Standard", val),
-                    "is_free": is_free,
-                })
-                logger.debug(f"DEX delivery attr: time={val!r} price={price_attr!r}")
+            if not val or not any(c.isalpha() for c in val):
+                continue
+            price_attr = (dex_el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
+            is_free = price_attr == "free" or "free" in val.lower()
+            _add(_make_option("Standard", val, is_free), "DEX")
     except Exception:
         pass
 
-    # STEP C — Try each fulfillment channel via CSS selectors.
+    # STEP C — Structured per-channel reads (Amazon Now ALM, Standard PRIMARY,
+    # Standard SECONDARY "Or fastest delivery"). Each match becomes its own
+    # option — no "first wins" cutoff per channel.
     for channel_def in _DELIVERY_CHANNEL_SELECTORS:
         channel_name = channel_def["channel"]
-        raw_text = None
 
         for selector in channel_def["selectors"]:
             try:
@@ -1299,72 +1384,62 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
                     EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
                 )
                 text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
-                if not text:
+                if not text or not any(kw in text.lower() for kw in channel_def["keywords"]):
                     continue
-                if any(kw in text.lower() for kw in channel_def["keywords"]):
-                    raw_text = text
-                    break
+                is_free = any(w in text.lower() for w in ["free", "₹0", "no charge"])
+                _add(_make_option(channel_name, text, is_free), f"{channel_name}/primary")
+                break
             except Exception:
                 continue
 
-        if raw_text:
-            is_free = any(w in raw_text.lower() for w in ["free", "₹0", "no charge"])
-            option = {
-                "channel": channel_name,
-                "raw_text": raw_text,
-                "display_text": _build_delivery_display(channel_name, raw_text, is_free),
-                "sort_minutes": _normalise_delivery_to_minutes(channel_name, raw_text),
-                "is_free": is_free,
-            }
-            result["all_options"].append(option)
-            logger.debug(f"Delivery PRIMARY option: {option}")
-        else:
-            logger.debug(f"No PRIMARY delivery text for channel: {channel_name}")
-
-        # BUG-FIX-FASTEST: Read SECONDARY/"Or fastest delivery" slot as well.
-        # This is a sibling element (NOT an accordion row) inside the same MIR
-        # delivery block. Without this read, the slower PRIMARY date wins because
-        # the faster SECONDARY date is never seen. find_elements returns [] when
-        # the slot is missing — that's fine, no exception.
         for selector in channel_def.get("fastest_selectors", []):
             try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for el in elements:
+                for el in driver.find_elements(By.CSS_SELECTOR, selector):
                     text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
-                    if not text:
-                        continue
-                    if not any(kw in text.lower() for kw in channel_def["keywords"]):
-                        continue
-                    # Skip if we've already captured this exact text via PRIMARY/DEX
-                    if any(o["raw_text"] == text for o in result["all_options"]):
+                    if not text or not any(kw in text.lower() for kw in channel_def["keywords"]):
                         continue
                     is_free = any(w in text.lower() for w in ["free", "₹0", "no charge"])
-                    option = {
-                        "channel": channel_name,
-                        "raw_text": text,
-                        "display_text": _build_delivery_display(channel_name, text, is_free),
-                        "sort_minutes": _normalise_delivery_to_minutes(channel_name, text),
-                        "is_free": is_free,
-                    }
-                    result["all_options"].append(option)
-                    logger.debug(f"Delivery FASTEST option: {option}")
+                    _add(_make_option(channel_name, text, is_free), f"{channel_name}/fastest")
             except Exception:
                 continue
 
-    # STEP D — Page source fallback when both channels miss.
+    # STEP D — Robust whole-container scan. Read the entire MIR delivery block
+    # text and extract every date-bearing fragment. This catches options Amazon
+    # adds with new slot ids or wording variants we haven't enumerated above.
+    CONTAINER_IDS = ["mir-layout-DELIVERY_BLOCK", "almLogoAndDeliveryMessage_feature_div"]
+    for container_id in CONTAINER_IDS:
+        try:
+            container = driver.find_element(By.ID, container_id)
+            block_text = re.sub(
+                r"\s+", " ",
+                (container.text or container.get_attribute("textContent") or ""),
+            ).strip()
+            if not block_text:
+                continue
+            # Split on segment boundaries Amazon uses between options.
+            # Don't split on the bare period before "Order within ..." because
+            # that fragment is per-option, not an option separator.
+            fragments = re.split(r"\s+Or\s+(?=fastest)|\s*•\s*|\n+", block_text)
+            for frag in fragments:
+                frag = frag.strip()
+                if len(frag) < 4:
+                    continue
+                dt = _parse_delivery_phrase(frag, now)
+                if dt is None:
+                    continue
+                channel_name = "Amazon Now" if re.search(r"\b(minutes?|hours?)\b", frag.lower()) else "Standard"
+                is_free = bool(re.search(r"\bfree\b|₹0", frag.lower()))
+                _add(_make_option(channel_name, frag, is_free), f"{container_id}/scan")
+        except Exception:
+            continue
+
+    # STEP E — Page-source regex fallback when every structured read missed.
     if not result["all_options"]:
         try:
-            source = driver.page_source
+            source = driver.page_source or ""
             m = re.search(r"(FREE delivery in \d+ minutes[^\"<]{0,60})", source, re.IGNORECASE)
             if m:
-                raw = m.group(1).strip()
-                result["all_options"].append({
-                    "channel": "Amazon Now",
-                    "raw_text": raw,
-                    "display_text": _build_delivery_display("Amazon Now", raw, True),
-                    "sort_minutes": _normalise_delivery_to_minutes("Amazon Now", raw),
-                    "is_free": True,
-                })
+                _add(_make_option("Amazon Now", m.group(1).strip(), True), "page-source")
             m = re.search(
                 r"((?:Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
                 r"[^\"<\n]{0,50})",
@@ -1372,42 +1447,37 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
             )
             if m:
                 raw = m.group(1).strip()
-                is_free = "free" in raw.lower()
-                result["all_options"].append({
-                    "channel": "Standard",
-                    "raw_text": raw,
-                    "display_text": _build_delivery_display("Standard", raw, is_free),
-                    "sort_minutes": _normalise_delivery_to_minutes("Standard", raw),
-                    "is_free": is_free,
-                })
+                _add(_make_option("Standard", raw, "free" in raw.lower()), "page-source")
         except Exception as e:
             logger.warning(f"Page source delivery fallback failed: {e}")
 
-    # STEP E — Pick the earliest option.
+    # STEP F — Dedup, sort by real datetime, pick earliest.
     if result["all_options"]:
-        # BUG-FIX-FASTEST: Dedup key was previously `channel`, which discarded the
-        # SECONDARY "Or fastest delivery" option whenever a PRIMARY Standard option
-        # had already been added (e.g. B0GS95NCTT — Tomorrow was dropped, Thursday
-        # was kept). Dedup by raw_text instead so distinct PRIMARY+SECONDARY texts
-        # both survive while genuine duplicates (DEX attr vs CSS read returning the
-        # same string) are still collapsed.
-        seen_texts: set = set()
-        unique_options = []
+        # Dedup by normalised display_text — collapses the same option seen
+        # via multiple sources (DEX attr + slot CSS + container scan all
+        # produce e.g. "Standard – Tomorrow, 20 May") while keeping genuinely
+        # distinct options like PRIMARY vs SECONDARY.
+        seen: set = set()
+        unique = []
         for opt in result["all_options"]:
-            key = opt["raw_text"].strip().lower()
-            if key not in seen_texts:
-                seen_texts.add(key)
-                unique_options.append(opt)
-        result["all_options"] = unique_options
+            key = opt["display_text"].strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(opt)
+        result["all_options"] = unique
 
-        result["all_options"].sort(key=lambda x: x["sort_minutes"])
+        # Sort by delivery_dt — options that couldn't be parsed (None) sort last.
+        far_future = datetime.max
+        result["all_options"].sort(key=lambda o: o["delivery_dt"] or far_future)
+
         earliest = result["all_options"][0]
         result["earliest_display"] = earliest["display_text"]
         result["is_free"] = earliest["is_free"]
         logger.debug(
             f"Earliest delivery: {earliest['display_text']} "
-            f"({earliest['sort_minutes']} min) | "
-            f"All: {[o['display_text'] for o in result['all_options']]}"
+            f"@ {earliest['delivery_dt']} ({earliest['sort_minutes']} min) | "
+            f"All: {[(o['display_text'], str(o['delivery_dt'])) for o in result['all_options']]}"
         )
 
     return result
