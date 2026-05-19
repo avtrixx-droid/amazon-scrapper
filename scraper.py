@@ -724,36 +724,86 @@ def human_delay(settings: Dict[str, object]) -> None:
 
 
 def detect_captcha(driver: Chrome) -> bool:
+    """Cheap CAPTCHA probe — runs on every scrape, so avoid `driver.page_source`
+    (full-DOM serialization). URL + title + a couple of selector probes catch
+    every known Amazon.in CAPTCHA variant we've seen."""
     try:
         url = (driver.current_url or "").lower()
+        if "captcha" in url or "/errors/validatecaptcha" in url:
+            return True
         title = (driver.title or "").lower()
-        page = (driver.page_source or "").lower()
-        if "captcha" in url or "captcha" in title:
+        if "captcha" in title or "robot check" in title:
             return True
-        if "enter the characters you see below" in page:
+        # The CAPTCHA page has a distinctive input id and a form action.
+        if driver.find_elements(By.ID, "captchacharacters"):
             return True
-        if 'id="captchacharacters"' in page:
+        if driver.find_elements(By.CSS_SELECTOR, "form[action='/errors/validateCaptcha']"):
             return True
     except Exception:
         return False
     return False
 
 
-def pause_for_captcha(driver: Chrome, logger: logging.Logger, progress_dir: Path, idx: int, completed: List[List[str]]) -> None:
+def pause_for_captcha(
+    driver: Chrome,
+    logger: logging.Logger,
+    progress_dir: Path,
+    idx: int,
+    completed: List[List[str]],
+    msg_queue=None,
+) -> None:
+    """Wait up to 5 minutes for a CAPTCHA to clear, polling every 10s.
+
+    Emits a countdown so the operator (or GUI) doesn't think the scraper hung.
+    If ``msg_queue`` is provided, countdown lines are pushed there instead of
+    printed — this keeps the GUI progress strip alive in worker mode.
+    Returns once the CAPTCHA clears. Raises SystemExit if it persists past
+    the deadline (progress is saved first).
+    """
+    total_seconds = 5 * 60
+    poll_interval = 10
+    deadline = time.time() + total_seconds
+
+    logger.warning("CAPTCHA detected; polling every %ds for up to %ds", poll_interval, total_seconds)
     print(
         "Amazon asked for verification.\n"
-        "Pausing 5 minutes automatically.\n"
+        "Pausing up to 5 minutes automatically.\n"
         "Please do not close this window."
     )
-    logger.warning("CAPTCHA detected; pausing 5 minutes")
-    time.sleep(5 * 60)
-    if detect_captcha(driver):
-        save_progress(progress_dir, idx, completed)
-        print(
-            "Script paused due to Amazon verification.\n"
-            f"Progress has been saved. Will resume from ASIN {idx}."
+
+    while True:
+        remaining = int(deadline - time.time())
+        if remaining <= 0:
+            break
+
+        mins, secs = divmod(remaining, 60)
+        line = (
+            f"⏳ Amazon asked for verification. Waiting up to 5 min before retry... "
+            f"({mins}:{secs:02d} remaining)"
         )
-        raise SystemExit(0)
+        if msg_queue is not None:
+            try:
+                msg_queue.put_nowait(
+                    {"type": "progress", "worker": -1, "done": -1, "total": -1,
+                     "status": "CAPTCHA", "msg": line}
+                )
+            except Exception:
+                pass
+        else:
+            print(line)
+
+        time.sleep(min(poll_interval, max(1, remaining)))
+        if not detect_captcha(driver):
+            logger.info("CAPTCHA cleared after %ds", total_seconds - remaining)
+            return
+
+    # Still blocked after the full wait — save and exit cleanly.
+    save_progress(progress_dir, idx, completed)
+    print(
+        "Script paused due to Amazon verification.\n"
+        f"Progress has been saved. Will resume from ASIN {idx}."
+    )
+    raise SystemExit(0)
 
 
 def open_homepage(driver: Chrome, logger: logging.Logger) -> None:
@@ -1671,38 +1721,89 @@ def wait_for_delivery_block(driver: Chrome, timeout: int = 8) -> bool:
 
 
 def validate_page_is_product(driver: Chrome, asin: str) -> str:
-    """Return 'OK', 'CAPTCHA', 'NOT_FOUND', 'WRONG_PAGE', or 'INCOMPLETE_LOAD'."""
+    """Return 'OK', 'CAPTCHA', 'NOT_FOUND', 'WRONG_PAGE', or 'INCOMPLETE_LOAD'.
+
+    Uses URL + title + selector probes instead of ``driver.page_source`` —
+    avoids a full-DOM serialization on every scrape (3000-row run = 3000
+    serializations otherwise).
+    """
     try:
-        url = driver.current_url or ""
-        source_sample = (driver.page_source or "")[:3000].lower()
+        url = (driver.current_url or "").lower()
+        title = (driver.title or "").lower()
     except Exception:
         return "WRONG_PAGE"
 
-    if "captcha" in source_sample or "robot check" in source_sample or "captcha" in url.lower():
+    if "captcha" in url or "/errors/validatecaptcha" in url or "captcha" in title or "robot check" in title:
         return "CAPTCHA"
-    if "page not found" in source_sample or "404" in url:
+    if "page-not-found" in url or "/404" in url or "page not found" in title:
         return "NOT_FOUND"
-    if asin.lower() not in source_sample:
+
+    # Canonical product URL contains the ASIN — if neither URL nor title has
+    # any Amazon footprint, we clearly aren't where we expected.
+    if asin.lower() not in url and "amazon" not in title:
         return "WRONG_PAGE"
-    if "add to cart" not in source_sample and "out of stock" not in source_sample:
-        return "INCOMPLETE_LOAD"
-    return "OK"
+
+    # Page rendered if any of these key elements exist. They're all O(1) lookups.
+    try:
+        if driver.find_elements(By.ID, "productTitle"):
+            return "OK"
+        if driver.find_elements(By.ID, "add-to-cart-button"):
+            return "OK"
+        if driver.find_elements(By.ID, "outOfStock"):
+            return "OK"
+    except Exception:
+        return "WRONG_PAGE"
+    return "INCOMPLETE_LOAD"
 
 
 _SCRAPE_COUNT = 0
+_RECYCLE_EVERY = 50  # Recycle Chrome every N successful scrapes to bound memory.
 
 
-def check_browser_health(driver: Chrome, logger: logging.Logger) -> bool:
-    """Return False (and log) if the browser has crashed; check every 50 scrapes."""
+def check_browser_health(driver: Chrome, logger: logging.Logger) -> Tuple[bool, bool]:
+    """Inspect the driver and decide whether the caller should recycle it.
+
+    Returns ``(is_alive, should_recycle)``:
+      - ``is_alive``  – False means the driver has crashed; caller MUST restart.
+      - ``should_recycle`` – True every ``_RECYCLE_EVERY`` calls as a pre-emptive
+        hint to swap drivers before Chrome memory creeps. The caller controls
+        the actual restart so it can re-set pincode / re-warm afterwards.
+    """
     global _SCRAPE_COUNT
     _SCRAPE_COUNT += 1
-    if _SCRAPE_COUNT % 50 == 0:
-        try:
-            driver.current_url
-        except Exception:
-            logger.warning("Browser unresponsive — needs restart")
-            return False
-    return True
+    is_alive = True
+    try:
+        _ = driver.current_url
+    except Exception:
+        logger.warning("Browser unresponsive — will recycle")
+        is_alive = False
+    should_recycle = (_SCRAPE_COUNT % _RECYCLE_EVERY == 0)
+    return is_alive, should_recycle
+
+
+def _recycle_driver(
+    driver: Optional[Chrome],
+    settings: Dict[str, object],
+    logger: logging.Logger,
+    base_dir: Path,
+    worker_id: int = 0,
+) -> Chrome:
+    """Quit the current driver, free its temp dir, and return a fresh driver.
+
+    Safe to call with a None / dead driver — quit failures are swallowed.
+    Caller is responsible for re-doing anything session-scoped (pincode, etc.).
+    """
+    try:
+        if driver is not None:
+            driver.quit()
+    except Exception:
+        logger.debug("Old driver quit raised (non-fatal)")
+    cleanup_chrome_temp()
+    new_driver = build_driver(
+        bool(settings["HEADLESS"]), logger, base_dir, worker_id=worker_id
+    )
+    open_homepage(new_driver, logger)
+    return new_driver
 
 
 def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: logging.Logger) -> ScrapeResult:
@@ -1801,10 +1902,23 @@ def scrape_with_smart_retry(
     idx_display: int,
     total_combos: int,
     completed_list: List[List[str]],
-) -> ScrapeResult:
+    settings: Dict[str, object],
+    base_dir: Path,
+) -> Tuple[ScrapeResult, Chrome]:
+    """Run scrape_one with up to 3 attempts. After any CAPTCHA pause the driver
+    is recycled (CLAUDE.md: 'do NOT reuse a stale driver instance'). Returns
+    ``(result, driver)`` so the caller picks up the possibly-fresh driver."""
+
+    def _after_captcha(d: Chrome) -> Chrome:
+        d = _recycle_driver(d, settings, logger, base_dir)
+        if set_pincode(d, pincode, city, logger):
+            wait_for_pincode_confirmation(d, pincode)
+        return d
+
     res = scrape_one(driver, asin, pincode, city, logger)
     if res.failure_reason == "CAPTCHA":
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
+        driver = _after_captcha(driver)
         res = scrape_one(driver, asin, pincode, city, logger)
 
     if res.status == "OK":
@@ -1812,7 +1926,7 @@ def scrape_with_smart_retry(
             f"✅ [{idx_display:04d}/{total_combos}] {asin} | {city:<10} | "
             f"₹{int(res.price) if res.price else 'NA'} | {res.delivery_date[:12]:<12} | {res.in_stock}"
         )
-        return res
+        return res, driver
 
     print(f"❌ [{idx_display:04d}/{total_combos}] {asin} | {city:<10} | Failed - Retrying...")
 
@@ -1825,13 +1939,14 @@ def scrape_with_smart_retry(
     res2 = scrape_one(driver, asin, pincode, city, logger)
     if res2.failure_reason == "CAPTCHA":
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
+        driver = _after_captcha(driver)
         res2 = scrape_one(driver, asin, pincode, city, logger)
     if res2.status == "OK":
         print(
             f"✅ [{idx_display:04d}/{total_combos}] {asin} | {city:<10} | "
             f"₹{int(res2.price) if res2.price else 'NA'} | {res2.delivery_date[:12]:<12} | {res2.in_stock}"
         )
-        return res2
+        return res2, driver
 
     print(f"❌ [{idx_display:04d}/{total_combos}] {asin} | {city:<10} | Failed - Retrying...")
 
@@ -1844,17 +1959,18 @@ def scrape_with_smart_retry(
     res3 = scrape_one(driver, asin, pincode, city, logger)
     if res3.failure_reason == "CAPTCHA":
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
+        driver = _after_captcha(driver)
         res3 = scrape_one(driver, asin, pincode, city, logger)
     if res3.status == "OK":
         print(
             f"✅ [{idx_display:04d}/{total_combos}] {asin} | {city:<10} | "
             f"₹{int(res3.price) if res3.price else 'NA'} | {res3.delivery_date[:12]:<12} | {res3.in_stock}"
         )
-        return res3
+        return res3, driver
 
     res3.status = "FAILED"
     res3.failure_reason = "Failed after retries"
-    return res3
+    return res3, driver
 
 
 # =====================================================
@@ -1862,20 +1978,24 @@ def scrape_with_smart_retry(
 # =====================================================
 
 
-# Fixed columns before the dynamic per-pincode columns
+# Fixed columns before the dynamic per-pincode columns.
+# Order matches CLAUDE.md "Excel Output Schema" section (cols A–N + Scraped At).
 FIXED_HEADERS = [
-    "Category",
-    "Item Name",
-    "Lapcare Item Code",
-    "ASIN Link",
-    "Current Price (₹)",
-    "MRP (₹)",
-    "Discount (%)",
-    "Product Ranking",
-    "Rating",
-    "Reviews",
-    "Seller",
-    "Scraped At",
+    "Category",            # A
+    "Item Name",           # B
+    "Lapcare Item Code",   # C
+    "ASIN Link",           # D
+    "Current Price (₹)",   # E
+    "MRP (₹)",             # F
+    "Discount (%)",        # G
+    "Product Ranking",     # H
+    "Availability",        # I — overall availability across pincodes
+    "Rating",              # J
+    "Reviews",             # K
+    "Seller",              # L
+    "Earliest Delivery",   # M — fastest delivery across all pincodes
+    "Free Delivery",       # N — Yes/No on the earliest option
+    "Scraped At",          # before the per-pincode block
 ]
 
 # Column index (1-based) of the ASIN Link in FIXED_HEADERS
@@ -1958,6 +2078,32 @@ def _pincode_cell_value(res: ScrapeResult) -> str:
     return avail
 
 
+def _pick_earliest_result(
+    asin_results: Dict[str, ScrapeResult],
+    now: Optional[datetime] = None,
+) -> Optional[ScrapeResult]:
+    """Return the OK result whose delivery_date parses to the earliest datetime.
+
+    Used to populate the "Earliest Delivery" and "Free Delivery" columns (the
+    fastest option across ALL pincodes for an ASIN). Returns None if no result
+    has a parseable delivery date.
+    """
+    if now is None:
+        now = datetime.now()
+    best: Optional[ScrapeResult] = None
+    best_dt: Optional[datetime] = None
+    for r in asin_results.values():
+        if r.status != "OK":
+            continue
+        dt = _parse_delivery_phrase(r.delivery_date or "", now)
+        if dt is None:
+            continue
+        if best_dt is None or dt < best_dt:
+            best = r
+            best_dt = dt
+    return best
+
+
 def _style_pivoted_row(
     ws,
     row_num: int,
@@ -2024,14 +2170,22 @@ def build_pivoted_excel(
         any_ok = next((r for r in asin_results.values() if r.status == "OK"), None)
         any_result = any_ok or next(iter(asin_results.values()))
 
+        # Fastest-delivery result across all pincodes (CLAUDE.md cols M, N).
+        # Falls back to `any_ok` so we still show *something* if no delivery
+        # date was parseable.
+        earliest = _pick_earliest_result(asin_results) or any_ok
+
         display_name = entry.item_name or any_result.product_name or "Not Found"
         price_val = any_ok.price if any_ok and any_ok.price is not None else "Not Found"
         mrp_val = any_ok.mrp if any_ok and any_ok.mrp is not None else "Not Found"
         discount_val = any_ok.discount_percent if any_ok else "N/A"
         bsr_val = any_ok.bsr if any_ok else "N/A"
+        availability_val = (any_ok.in_stock if any_ok else (any_result.in_stock or "Not Found"))
         rating_val = any_ok.rating if any_ok else "Not Found"
         reviews_val = any_ok.reviews if any_ok else "Not Found"
         seller_val = any_ok.seller if any_ok else "Amazon"
+        earliest_delivery_val = (earliest.delivery_date if earliest else "N/A") or "N/A"
+        free_delivery_val = (earliest.free_delivery if earliest else "N/A") or "N/A"
         scraped_val = any_result.scraped_at or ""
 
         product_url = asin_url(asin)
@@ -2045,9 +2199,12 @@ def build_pivoted_excel(
             mrp_val,
             discount_val,
             bsr_val,
+            availability_val,
             rating_val,
             reviews_val,
             seller_val,
+            earliest_delivery_val,
+            free_delivery_val,
             scraped_val,
         ]
 
@@ -2369,8 +2526,18 @@ def run_worker(
                     if res.failure_reason == "CAPTCHA":
                         qput({"type": "progress", "worker": worker_id, "done": done,
                               "total": total_combos, "status": "CAPTCHA",
-                              "msg": f"⚠️  W{worker_id} CAPTCHA — pausing 5 min…"})
-                        time.sleep(5 * 60)
+                              "msg": f"⚠️  W{worker_id} CAPTCHA detected — pausing up to 5 min"})
+                        # Polls + emits countdown ticks to the GUI via msg_queue
+                        # so the worker doesn't look frozen.
+                        pause_for_captcha(
+                            driver, logger, worker_dir, done, [], msg_queue=msg_queue
+                        )
+                        # CLAUDE.md: do NOT reuse a stale driver after CAPTCHA pause
+                        driver = _recycle_driver(
+                            driver, settings, logger, base_dir, worker_id=worker_id
+                        )
+                        if set_pincode(driver, pincode, city, logger):
+                            wait_for_pincode_confirmation(driver, pincode)
                         res = scrape_one(driver, entry.asin, pincode, city, logger)
                     if res.status != "OK":
                         time.sleep(random.uniform(5, 15))
@@ -2379,6 +2546,15 @@ def run_worker(
                         except Exception:
                             pass
                         res = scrape_one(driver, entry.asin, pincode, city, logger)
+
+                    # Periodic browser recycle + crash recovery, AFTER the scrape.
+                    alive, should_recycle = check_browser_health(driver, logger)
+                    if (not alive) or should_recycle:
+                        driver = _recycle_driver(
+                            driver, settings, logger, base_dir, worker_id=worker_id
+                        )
+                        if set_pincode(driver, pincode, city, logger):
+                            wait_for_pincode_confirmation(driver, pincode)
                 except Exception as exc:
                     logger.exception("scrape error in worker")
                     ts2 = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -2644,7 +2820,7 @@ def main() -> None:
                 res = None
                 try:
                     human_delay(settings)
-                    res = scrape_with_smart_retry(
+                    res, driver = scrape_with_smart_retry(
                         driver,
                         entry.asin,
                         pincode,
@@ -2654,7 +2830,17 @@ def main() -> None:
                         idx_display,
                         total_combos,
                         completed_list,
+                        settings,
+                        base_dir,
                     )
+
+                    # Periodic browser recycle + crash recovery. Done AFTER the
+                    # scrape so we never throw away an in-flight page.
+                    alive, should_recycle = check_browser_health(driver, logger)
+                    if (not alive) or should_recycle:
+                        driver = _recycle_driver(driver, settings, logger, base_dir)
+                        if set_pincode(driver, pincode, city, logger):
+                            wait_for_pincode_confirmation(driver, pincode)
 
                     if res.status == "OK":
                         success_counter += 1

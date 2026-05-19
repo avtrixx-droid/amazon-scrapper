@@ -72,7 +72,14 @@ AmazonScraper/
 | signal | built-in | Ctrl+C and SIGTERM handling |
 
 **Do not switch to regular selenium or playwright.**
-**Do not use threading or multiprocessing** — undetected-chromedriver is not thread-safe.
+**Do not use threading inside a single process** — undetected-chromedriver is not thread-safe.
+
+**Multiprocessing is allowed for per-pincode-subset parallelism.** `gui.py`
+spawns `scraper.run_worker` via `multiprocessing.Process`; each worker has its
+own Python interpreter, its own `Chrome` driver, and its own Chrome temp dir.
+Workers communicate with the GUI through a `multiprocessing.Queue`. This is
+safe because no driver is shared across processes. **Do NOT** introduce
+`threading.Thread` or share a driver between threads.
 
 ---
 
@@ -580,6 +587,11 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 | Logs accumulate forever | No cleanup | Auto-delete logs older than 30 days on startup |
 | **Windows .exe crash: `ModuleNotFoundError: No module named 'psutil'`** | `psutil` and its platform backends not listed in `hiddenimports` in `amazon_scraper_windows.spec` — PyInstaller misses runtime-only imports | Added `psutil`, `psutil._psutil_windows`, `psutil._psutil_linux`, `psutil._psutil_osx`, `psutil._common` to `hiddenimports` in both `.spec` files; rewrote `build_exe.bat` to use `amazon_scraper_windows.spec` |
 | **Mac error -47 ("application cannot be opened")** | Missing ad-hoc code signature — macOS 12+ (Monterey) and all Apple Silicon Macs require at least an ad-hoc signature even for local builds | Added `codesign --force --deep --sign - dist/AmazonScraper.app` step to `build_mac.sh` after `xattr -cr`; added vendor-friendly Gatekeeper instructions to `README.txt` |
+| **Excel missing CLAUDE.md cols I/M/N** | `FIXED_HEADERS` omitted Availability, Earliest Delivery, Free Delivery — fastest date was only inlined into per-pincode columns | Added all three to `FIXED_HEADERS`; new `_pick_earliest_result()` selects the globally-earliest OK result per ASIN by parsing `delivery_date` through `_parse_delivery_phrase` |
+| **Chrome memory creep over long runs** | `check_browser_health` was dead code (defined, never called) — driver lived for entire 8h+ run | Wired `check_browser_health` into both CLI loop and `run_worker`; returns `(is_alive, should_recycle)`; new `_recycle_driver()` helper quits + cleans temp dir + relaunches every 50 scrapes |
+| **Stale driver reused after CAPTCHA** | Old code did `time.sleep(5*60)` then retried with the same driver, violating "create fresh driver after CAPTCHA pause" | `pause_for_captcha` now polls every 10s with a countdown; callers (`scrape_with_smart_retry` and `run_worker`) recycle the driver after the pause and re-set pincode |
+| **CAPTCHA wait looked like a freeze (especially in GUI)** | Flat 5-min sleep blocked the worker's `msg_queue`, so the GUI progress strip went silent | `pause_for_captcha` takes an optional `msg_queue=` parameter; emits a "M:SS remaining" tick every 10s so the GUI keeps updating |
+| **`detect_captcha` pulled full `page_source` on every scrape** | Full-DOM serialization × 3000 scrapes was a measurable hot-path cost | Replaced with URL + title + `find_elements` selector probes (`#captchacharacters`, `form[action='/errors/validateCaptcha']`); `validate_page_is_product` got the same treatment |
 
 ---
 
