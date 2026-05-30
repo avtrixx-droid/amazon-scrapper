@@ -1306,6 +1306,53 @@ def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
     return max(0, delta)
 
 
+# BUG-FIX-CUTOFF: Amazon's SECONDARY ("Or fastest delivery …") slot text ends
+# with an *order-by* countdown — "Order within 2 hrs 37 mins" — which is the
+# deadline to place the order for the fast option, NOT the delivery duration.
+# The bare-duration regex used to capture "2 hrs 37 mins" out of context, the
+# parser resolved it to "now + 2 hours", and that won the sort against the
+# real promise ("Tomorrow 8 am - 12 pm" → tomorrow noon). Wipe these
+# countdowns from the source text BEFORE any extraction regex runs.
+_NON_DELIVERY_PHRASE_RE = re.compile(
+    # "Order within 2 hrs 37 mins" — fastest-delivery cutoff countdown
+    r"(?:\.\s*)?\bOrder\s+within\s+[^.<\n]*"
+    # "Ends in 4 hours" / "Expires in 30 minutes" — lightning-deal countdown
+    r"|\b(?:ends|expires)\s+in\s+\d+\s+(?:hours?|hrs?|minutes?|mins?)\b[^.<\n]{0,40}"
+    # "30 mins left" / "2 hours remaining" — generic countdown
+    r"|\b\d+\s+(?:hours?|hrs?|minutes?|mins?)\s+(?:left|remaining)\b",
+    re.IGNORECASE,
+)
+
+# Matches a month name (3-letter or full) so we can tell whether a phrase
+# already includes an explicit date. Used to decide whether to append the
+# computed delivery date to the display string.
+_HAS_DATE_RE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may"
+    r"|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?"
+    r"|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+    re.IGNORECASE,
+)
+
+# Relative-day keywords that we should anchor with an explicit date when known.
+_RELATIVE_DAY_RE = re.compile(
+    r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_delivery_text(text: str) -> str:
+    """Strip non-delivery phrases that look like durations.
+
+    Run BEFORE any date / duration regex extraction so that "Order within
+    2 hrs 37 mins" countdowns can't masquerade as delivery promises.
+    """
+    if not text:
+        return text
+    cleaned = _NON_DELIVERY_PHRASE_RE.sub(" ", text)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
 def _clean_delivery_text(raw_text: str) -> str:
     """Strip Amazon's prefixes/suffixes/noise; return the bare promise text.
 
@@ -1313,22 +1360,48 @@ def _clean_delivery_text(raw_text: str) -> str:
         "FREE delivery in 10 minutes on orders over ₹149" → "10 Minutes"
         "Or fastest delivery Tomorrow, 31 May. Details"   → "Tomorrow, 31 May"
         "Get it by Monday, June 3"                        → "Monday, June 3"
+        "Tomorrow 8 am - 12 pm"                           → "Tomorrow 8 AM - 12 PM"
     """
     text = (raw_text or "").strip()
+    # BUG-FIX-CUTOFF: drop order-by / countdown phrases first.
+    text = _normalize_delivery_text(text)
     # Leading noise — "Or fastest delivery …", "FREE delivery in …", "Get it by …"
     text = re.sub(r"^(or\s+)?fastest\s+delivery\s+", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(
         r"^(free\s+delivery\s+in\s+|free\s+delivery\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+|delivery\s+in\s+|delivery\s+)",
         "", text, flags=re.IGNORECASE,
     ).strip()
-    # Trailing noise — "on orders over ₹149", "Details", countdown, badges
+    # Trailing noise — "on orders over ₹149", "Details", badges
     text = re.sub(r"\s+on orders over.*$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"\.\s*order within[\s\d\w]+", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"on\s+your\s+first\s+order\.?", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"limited\s+period\s+offer\.?", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\[?details\]?\.?\s*$", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\s{2,}", " ", text).strip(" .,")
-    return text.title()
+    titled = text.title()
+    # AM/PM should stay uppercase — `.title()` would give "8 Am - 12 Pm".
+    titled = re.sub(r"\b(Am|Pm)\b", lambda m: m.group(1).upper(), titled)
+    return titled
+
+
+def _format_delivery_date(dt: datetime) -> str:
+    """Format a datetime as '31 May' (no leading zero, short month). Windows-safe."""
+    return f"{dt.day} {dt.strftime('%b')}"
+
+
+def _maybe_append_date(cleaned: str, delivery_dt: Optional[datetime]) -> str:
+    """If the cleaned text refers to a relative day but has NO explicit month,
+    append the resolved date in user-chosen format B: '… – 31 May'.
+
+    No-op when delivery_dt is None, when the text already contains a month
+    name, or when the text has no relative-day keyword to anchor.
+    """
+    if not cleaned or delivery_dt is None:
+        return cleaned
+    if _HAS_DATE_RE.search(cleaned):
+        return cleaned  # already dated — don't double up
+    if not _RELATIVE_DAY_RE.search(cleaned):
+        return cleaned  # nothing relative to anchor
+    return f"{cleaned} – {_format_delivery_date(delivery_dt)}"
 
 
 def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
@@ -1344,15 +1417,28 @@ def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
     return f"{channel} – {text}{free_label}"
 
 
-def _build_amazon_now_display(raw_text: str) -> str:
-    """Tier 1 output: 'Amazon Now – 10 Minutes' / 'Amazon Now – 2 Hours'."""
+def _build_amazon_now_display(raw_text: str, delivery_dt: Optional[datetime] = None) -> str:
+    """Tier 1 output: 'Amazon Now – 10 Minutes' / 'Amazon Now – 2 Hours'.
+
+    If the cleaned text contains a relative-day word (rare for Amazon Now but
+    possible), append the computed date in format B: '… – 31 May'.
+    """
     text = _clean_delivery_text(raw_text)
-    return f"Amazon Now – {text}" if text else ""
+    if not text:
+        return ""
+    text = _maybe_append_date(text, delivery_dt)
+    return f"Amazon Now – {text}"
 
 
-def _build_standard_display(raw_text: str) -> str:
-    """Tier 2 output: 'Tomorrow, 31 May' / 'Today' / '2 June' (no prefix, no (Free))."""
-    return _clean_delivery_text(raw_text)
+def _build_standard_display(raw_text: str, delivery_dt: Optional[datetime] = None) -> str:
+    """Tier 2 output: 'Tomorrow, 31 May' / 'Today – 30 May' / 'Tomorrow 8 AM - 12 PM – 31 May'.
+
+    When the raw text says "Tomorrow 8 am - 12 pm" without a date (Amazon's
+    SECONDARY slot pattern), inject the computed date so the vendor's Excel
+    cell shows a concrete day, not just "Tomorrow".
+    """
+    cleaned = _clean_delivery_text(raw_text)
+    return _maybe_append_date(cleaned, delivery_dt)
 
 
 # ── Pattern-based selectors for the tiered delivery extractor ────────────────
@@ -1531,6 +1617,12 @@ def extract_earliest_delivery_from_text(
         "is_free": False,
         "all_options": [],
     }
+    if not text:
+        return result
+
+    # BUG-FIX-CUTOFF: strip "Order within X" / "Ends in X" / "X left" countdowns
+    # so they don't get captured by `_BARE_DURATION_RE` and beat real promises.
+    text = _normalize_delivery_text(text)
     if not text:
         return result
 
@@ -1817,10 +1909,14 @@ def _extract_amazon_now(
         text = _element_text(el)
         if not text:
             continue
+        # BUG-FIX-CUTOFF: strip "Order within X" / "Ends in X" before parsing.
+        text = _normalize_delivery_text(text)
+        if not text:
+            continue
         dt = _parse_delivery_phrase(text, now)
         if dt is None:
             continue
-        display = _build_amazon_now_display(text)
+        display = _build_amazon_now_display(text, dt)
         if not display:
             continue
         is_free_flag = _is_free(text)
@@ -1882,7 +1978,7 @@ def _extract_standard_delivery(
     deduped: list = []
     seen_display: set = set()
     for c in candidates:
-        display = _build_standard_display(c["raw_text"])
+        display = _build_standard_display(c["raw_text"], c["delivery_dt"])
         key = display.lower()
         if key in seen_display:
             continue
@@ -1941,9 +2037,9 @@ def _extract_buybox_fallback(
 
     earliest_opt = text_result["all_options"][0]
     if earliest_opt["channel"] == "Amazon Now":
-        display = _build_amazon_now_display(earliest_opt["raw_text"])
+        display = _build_amazon_now_display(earliest_opt["raw_text"], earliest_opt["delivery_dt"])
     else:
-        display = _build_standard_display(earliest_opt["raw_text"])
+        display = _build_standard_display(earliest_opt["raw_text"], earliest_opt["delivery_dt"])
 
     logger.warning(
         f"[{asin_hint}][{pincode}] EARLIEST (Tier 3 / buy-box fallback): "

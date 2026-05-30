@@ -23,8 +23,11 @@ from scraper import (  # noqa: E402
     _extract_buybox_fallback,
     _extract_standard_delivery,
     _filter_delivery_lines,
+    _format_delivery_date,
     _infer_channel,
     _is_free,
+    _maybe_append_date,
+    _normalize_delivery_text,
     _parse_delivery_phrase,
     _score_buy_box_candidate,
     extract_earliest_delivery_from_text,
@@ -707,9 +710,173 @@ class TieredFlowIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(t1)
         self.assertEqual(t1["earliest_display"], "Amazon Now – 2 Hours")
         # Tier 2 isn't called in the real flow because Tier 1 returned early,
-        # but for documentation: it WOULD return "Today" if asked.
+        # but for documentation: it WOULD return "Today – 30 May" if asked
+        # (relative-day text has the resolved date appended).
         t2 = _extract_standard_delivery(scope, NOW, _TierLogger(), "B0X", "110001")
-        self.assertEqual(t2["earliest_display"], "Today")
+        self.assertEqual(t2["earliest_display"], "Today – 30 May")
+
+
+class CutoffStrippingTests(unittest.TestCase):
+    """Regression for "Order within X hrs Y mins" cutoff countdowns leaking
+    into the delivery date column.
+    """
+
+    def test_order_within_stripped(self) -> None:
+        text = "Or fastest delivery Tomorrow 8 am - 12 pm. Order within 2 hrs 37 mins"
+        self.assertEqual(
+            _normalize_delivery_text(text),
+            "Or fastest delivery Tomorrow 8 am - 12 pm",
+        )
+
+    def test_order_within_stripped_no_period(self) -> None:
+        text = "Tomorrow 8 am - 12 pm Order within 2 hrs 37 mins"
+        out = _normalize_delivery_text(text)
+        self.assertNotIn("Order within", out)
+        self.assertNotIn("2 hrs", out)
+
+    def test_ends_in_stripped(self) -> None:
+        out = _normalize_delivery_text("Lightning deal Ends in 4 hours")
+        self.assertNotIn("4 hours", out)
+
+    def test_expires_in_stripped(self) -> None:
+        out = _normalize_delivery_text("Expires in 30 minutes")
+        self.assertNotIn("30 minutes", out)
+
+    def test_left_remaining_stripped(self) -> None:
+        self.assertNotIn("30 mins", _normalize_delivery_text("Hurry — 30 mins left"))
+        self.assertNotIn("2 hours", _normalize_delivery_text("2 hours remaining"))
+
+    def test_real_delivery_in_preserved(self) -> None:
+        # "delivery in X" is a real promise — must NOT be stripped.
+        self.assertIn(
+            "10 minutes",
+            _normalize_delivery_text("FREE delivery in 10 minutes"),
+        )
+
+    def test_cutoff_only_returns_no_candidate(self) -> None:
+        # Parser sees only the cutoff after stripping — nothing parseable.
+        for s in [
+            "Order within 1 hr 30 mins",
+            "Ends in 4 hours",
+            "30 mins left",
+            "2 hours remaining",
+        ]:
+            normalized = _normalize_delivery_text(s)
+            dt = _parse_delivery_phrase(normalized, NOW) if normalized else None
+            self.assertIsNone(dt, f"Should be None for {s!r}, got {dt}")
+
+    def test_extractor_picks_tomorrow_over_cutoff(self) -> None:
+        # The full bug repro: SECONDARY text with cutoff.
+        text = "Or fastest delivery Tomorrow 8 am - 12 pm. Order within 2 hrs 37 mins"
+        r = extract_earliest_delivery_from_text(text, "Standard", NOW)
+        # earliest_dt is tomorrow noon, not now + 2 hours.
+        self.assertEqual(r["earliest_dt"], datetime(2026, 5, 31, 12, 0))
+        # No "2 hrs" candidate exists in the option list.
+        for opt in r["all_options"]:
+            self.assertNotIn("2 Hrs", opt["display_text"])
+            self.assertNotIn("37 Mins", opt["display_text"])
+
+
+class DateInjectionTests(unittest.TestCase):
+    """Format B: when raw text has 'Tomorrow' / 'Today' / weekday without an
+    explicit date, append ' – {day} {Mon}' computed from the resolved datetime.
+    """
+
+    def test_format_delivery_date(self) -> None:
+        # No leading zero on the day, short month abbreviation. Windows-safe.
+        self.assertEqual(_format_delivery_date(datetime(2026, 5, 31)), "31 May")
+        self.assertEqual(_format_delivery_date(datetime(2026, 6, 2)), "2 Jun")
+        self.assertEqual(_format_delivery_date(datetime(2026, 1, 9)), "9 Jan")
+
+    def test_maybe_append_no_dt(self) -> None:
+        self.assertEqual(_maybe_append_date("Tomorrow", None), "Tomorrow")
+
+    def test_maybe_append_already_dated(self) -> None:
+        # Already has month name — don't double up.
+        self.assertEqual(
+            _maybe_append_date("Tomorrow, 31 May", datetime(2026, 5, 31)),
+            "Tomorrow, 31 May",
+        )
+
+    def test_maybe_append_no_relative_word(self) -> None:
+        # Pure date phrase, no relative-day word — nothing to anchor.
+        self.assertEqual(
+            _maybe_append_date("2 June", datetime(2026, 6, 2)),
+            "2 June",
+        )
+
+    def test_maybe_append_tomorrow(self) -> None:
+        self.assertEqual(
+            _maybe_append_date("Tomorrow 8 AM - 12 PM", datetime(2026, 5, 31)),
+            "Tomorrow 8 AM - 12 PM – 31 May",
+        )
+
+    def test_maybe_append_today(self) -> None:
+        self.assertEqual(
+            _maybe_append_date("Today", datetime(2026, 5, 30, 20, 0)),
+            "Today – 30 May",
+        )
+
+    def test_maybe_append_weekday(self) -> None:
+        self.assertEqual(
+            _maybe_append_date("Monday", datetime(2026, 6, 1)),
+            "Monday – 1 Jun",
+        )
+
+    def test_build_standard_display_with_dt(self) -> None:
+        # The user's exact failing scenario, end-to-end through the builder.
+        out = _build_standard_display(
+            "Or fastest delivery Tomorrow 8 am - 12 pm",
+            datetime(2026, 5, 31, 12, 0),
+        )
+        self.assertEqual(out, "Tomorrow 8 AM - 12 PM – 31 May")
+
+    def test_build_standard_display_preserves_existing_date(self) -> None:
+        out = _build_standard_display(
+            "FREE delivery Tomorrow, 31 May. Details",
+            datetime(2026, 5, 31, 12, 0),
+        )
+        self.assertEqual(out, "Tomorrow, 31 May")
+
+    def test_am_pm_uppercased(self) -> None:
+        # .title() would produce "Am"/"Pm" — we want "AM"/"PM".
+        self.assertIn("AM", _clean_delivery_text("Tomorrow 8 am - 12 pm"))
+        self.assertIn("PM", _clean_delivery_text("Tomorrow 8 am - 12 pm"))
+        self.assertNotIn("Am", _clean_delivery_text("Tomorrow 8 am - 12 pm"))
+        self.assertNotIn("Pm", _clean_delivery_text("Tomorrow 8 am - 12 pm"))
+
+
+class EndToEndCutoffFixTests(unittest.TestCase):
+    """Full Tier 2 flow with the user-reported failing text."""
+
+    def test_secondary_slot_with_cutoff(self) -> None:
+        primary = FakeElement(text="FREE delivery Tomorrow, 31 May. Details")
+        secondary = FakeElement(text=(
+            "Or fastest delivery Tomorrow 8 am - 12 pm. "
+            "Order within 2 hrs 37 mins"
+        ))
+        scope = FakeElement({_STANDARD_DELIVERY_SELECTOR: [primary, secondary]})
+        result = _extract_standard_delivery(scope, NOW, _TierLogger(), "B0X", "110001")
+        self.assertIsNotNone(result)
+        # The earliest_display must be one of the real promises, NEVER "2 Hrs".
+        self.assertNotIn("2 Hrs", result["earliest_display"])
+        self.assertNotIn("37 Mins", result["earliest_display"])
+        # Both candidates resolve to tomorrow noon. Either wins the dedup.
+        self.assertIn("Tomorrow", result["earliest_display"])
+
+    def test_only_secondary_with_cutoff(self) -> None:
+        # If only SECONDARY is present (PRIMARY missing), we still get the
+        # right promise, with the computed date appended.
+        secondary = FakeElement(text=(
+            "Or fastest delivery Tomorrow 8 am - 12 pm. "
+            "Order within 2 hrs 37 mins"
+        ))
+        scope = FakeElement({_STANDARD_DELIVERY_SELECTOR: [secondary]})
+        result = _extract_standard_delivery(scope, NOW, _TierLogger(), "B0X", "110001")
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result["earliest_display"], "Tomorrow 8 AM - 12 PM – 31 May"
+        )
 
 
 if __name__ == "__main__":
