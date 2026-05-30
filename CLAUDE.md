@@ -43,6 +43,8 @@ AmazonScraper/
 ├── README.txt                    ← vendor-facing, non-technical instructions
 ├── README_VENDOR_APP.txt         ← shipped with the built app
 ├── templates/                    ← Flask HTML templates for gui.py
+├── tests/                        ← unittest suite (Selenium-free parser tests)
+│   └── test_delivery_parser.py   ← 42 tests for the delivery priority resolver
 ├── logs/                         ← auto-created; scraper_YYYYMMDD_HHMMSS.log per run
 ├── output/                       ← timestamped Excel files: AmazonReport_YYYYMMDD_HHMMSS.xlsx
 ├── progress/                     ← progress.json for resume state
@@ -224,6 +226,39 @@ so all pincodes showed the first pincode's delivery date (stale-data copy bug).
 - Falls back to page source regex if CSS selectors all miss
 - Output format: `"Amazon Now – 10 Min (Free)"` / `"Standard – Tomorrow, 14 May (Free)"`
 - Returns `"Not Available"` for OOS items (never blank/None)
+
+**Follow-up (BUG-FIX-AMZNOW, 2026-05-30):** On products where Amazon shows both an Amazon Now
+buy-box row AND a Standard buy-box row in the new accordion, the scraper kept reporting the
+Standard "Tomorrow, 31 May" promise instead of the faster "FREE delivery in 10 minutes" one.
+Three independent reasons were dropping the Amazon Now candidate:
+
+1. `_parse_delivery_phrase` only matched the full words "minute"/"hour" — "30 mins", "2 hrs",
+   "15 min", "1 hr" all silently returned `None`, so Amazon Now widgets using the abbreviated
+   forms produced zero candidates. Fixed by switching the duration regex to
+   `\b(\d+)\s+(?:minutes?|mins?)\b` / `\b(\d+)\s+(?:hours?|hrs?)\b`.
+2. The container sweep list only knew about the legacy `#alm-…` IDs. Amazon's new
+   multi-offer accordion uses `#mbc`, `#newAccordionRow_0/1/2`, `#qcomBuyBoxRow_feature_div`,
+   `#almOfferDisplay_feature_div`, `#promiseMessage_feature_div`,
+   `#buybox-default_feature_div`. Added all of them to `_DELIVERY_CONTAINER_IDS`.
+3. `wait_for_delivery_block` returned `True` the moment ANY one channel populated. If the
+   Standard MIR slot filled first, the page-source snapshot was taken before the Amazon Now
+   accordion row hydrated. Now: if a fast-channel container is present in the DOM, wait for it
+   to be populated too (not just the standard MIR slot). Page-source scan is also no longer
+   capped at the first 200 KB and a `document.body.innerText` fallback was added for pages
+   where Amazon Now content only appears after React hydration.
+
+Also fixed: `_MONTHS` only had 3-letter prefixes, so "June 2" / "Tuesday, June 4" failed the
+date-precedence step and silently fell through to weekday inference (returning the wrong date).
+Long-form month names are now matched.
+
+Also fixed: "today" used to resolve to today-at-noon, which is in the past for any afternoon
+scrape — that caused "today" to wrongly sort ahead of a same-day "10 minutes" candidate.
+"today" now resolves to today-at-20:00 (end of business), preserving today < tomorrow ordering
+while letting minutes/hours candidates win within the same day.
+
+New pure-Python helper `extract_earliest_delivery_from_text(text, default_channel, now)` lives
+in `scraper.py`. It is Selenium-free so the priority rules are unit-testable. Coverage in
+`tests/test_delivery_parser.py` (42 cases) — run with `python -m unittest tests.test_delivery_parser`.
 
 ---
 
@@ -592,6 +627,7 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 | **Stale driver reused after CAPTCHA** | Old code did `time.sleep(5*60)` then retried with the same driver, violating "create fresh driver after CAPTCHA pause" | `pause_for_captcha` now polls every 10s with a countdown; callers (`scrape_with_smart_retry` and `run_worker`) recycle the driver after the pause and re-set pincode |
 | **CAPTCHA wait looked like a freeze (especially in GUI)** | Flat 5-min sleep blocked the worker's `msg_queue`, so the GUI progress strip went silent | `pause_for_captcha` takes an optional `msg_queue=` parameter; emits a "M:SS remaining" tick every 10s so the GUI keeps updating |
 | **`detect_captcha` pulled full `page_source` on every scrape** | Full-DOM serialization × 3000 scrapes was a measurable hot-path cost | Replaced with URL + title + `find_elements` selector probes (`#captchacharacters`, `form[action='/errors/validateCaptcha']`); `validate_page_is_product` got the same treatment |
+| **Amazon Now / Quick Commerce promise overlooked on accordion buy-box** | (a) Duration regex matched only "minute"/"hour" so "30 mins"/"2 hrs" dropped silently. (b) Container list missed `#mbc`, `#newAccordionRow_*`, `#qcomBuyBoxRow_feature_div`, `#almOfferDisplay_feature_div` — Amazon's new multi-offer buy box. (c) `wait_for_delivery_block` returned on the first populated channel, so the scraper read the page-source snapshot before Amazon Now hydrated. (d) `_MONTHS` only had 3-letter prefixes so "June 2" failed. (e) "Today" resolved to today-noon (in the past after lunch), wrongly beating same-day "10 minutes" candidates. | (a) Duration regex now allows `mins?`/`hrs?`. (b) Container list extended. (c) Wait now blocks until fast-channel containers populate when present; page-source scan no longer capped at 200 KB; added `document.body.innerText` fallback. (d) Full month names added to `_MONTHS` and `_MONTH_PAT`. (e) "Today" resolves to today-at-20:00. New pure helper `extract_earliest_delivery_from_text` lets the priority rules be unit-tested (`tests/test_delivery_parser.py`, 42 cases). |
 
 ---
 

@@ -1132,64 +1132,6 @@ def extract_availability(driver: Chrome, logger: logging.Logger) -> str:
     return "Out of Stock"  # BUG-FIX
 
 
-# ── Delivery channel selectors ────────────────────────────────────────────────
-# Amazon buy box renders delivery as a multi-row accordion. Each row is a
-# different fulfillment channel. We must read ALL rows and pick the earliest.
-#
-# CHANNEL 1 — Amazon Now (ALM — Amazon Local Market)
-#   Identified by: data-csa-c-buying-option-type="ALM" on parent container
-#   Delivery message: #alm-delivery-message span
-#
-# CHANNEL 2 — Standard courier (MIR block)
-#   Delivery message: #mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span
-#
-# CHANNEL 3 — DEX unified widget (newer pages)
-#   Delivery time stored in data-csa-c-delivery-time attribute on span elements
-
-_DELIVERY_CHANNEL_SELECTORS = [
-    {
-        "channel": "Amazon Now",
-        "selectors": [
-            "#alm-delivery-message span.a-size-base",
-            "#alm-delivery-message span",
-            "#almLogoAndDeliveryMessage_feature_div .a-size-base",
-        ],
-        "keywords": ["minutes", "hours", "amazon now", "instant"],
-    },
-    {
-        "channel": "Standard",
-        "selectors": [
-            "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span[data-csa-c-slot-id]",
-            "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE span",
-            "#deliveryMessageMirWidget span",
-            "#ddmDeliveryMessage",
-            ".delivery-message span",
-            "[data-feature-name='delivery-message'] span",
-        ],
-        # BUG-FIX-FASTEST: SECONDARY slot was previously not read at all. Amazon shows
-        # "Or fastest delivery Tomorrow, …" as a sibling div of the PRIMARY slot. The
-        # SECONDARY date is often earlier than PRIMARY (paid same-day vs free standard).
-        # Confirmed against B0GS95NCTT (Mumbai 400001) on 2026-05-19:
-        #   PRIMARY:   "FREE delivery Thursday, 21 May on your first order. Details"
-        #   SECONDARY: "Or fastest delivery Tomorrow, 20 May. Order within 10 hrs 17 mins. Details"
-        # Both live inside #mir-layout-DELIVERY_BLOCK as sibling <div>s. The attribute
-        # selector [data-csa-c-slot-id='SECONDARY_…'] does NOT match — Amazon exposes
-        # the slot identity via element id only.
-        "fastest_selectors": [
-            "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE span",
-            "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_SMALL span",
-        ],
-        "keywords": [
-            "tomorrow", "today", "monday", "tuesday", "wednesday",
-            "thursday", "friday", "saturday", "sunday",
-            "jan", "feb", "mar", "apr", "may", "jun",
-            "jul", "aug", "sep", "oct", "nov", "dec", "day", "days",
-            "fastest",  # BUG-FIX-FASTEST: SECONDARY slot text starts with "Or fastest delivery"
-        ],
-    },
-]
-
-
 _DELIVERY_NOISE_RE = re.compile(
     r"^(or\s+)?fastest\s+delivery\s+"
     # Don't strip the "in" / "by" that follows "delivery" — the duration and
@@ -1205,9 +1147,29 @@ _DELIVERY_NOISE_RE = re.compile(
 )
 
 _MONTHS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
 }
+# BUG-FIX-AMZNOW: include long-form month names so "June 2" / "Delivery by
+# Tuesday, June 4" parse correctly. Previously only 3-letter prefixes were in
+# the alternation and `\b` after "jun" failed against "june", so explicit dates
+# with full month names silently fell through to weekday-name inference and
+# produced the wrong delivery date.
+_MONTH_PAT = (
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may"
+    r"|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?"
+    r"|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
 _WEEKDAYS = [
     "monday", "tuesday", "wednesday", "thursday",
     "friday", "saturday", "sunday",
@@ -1264,18 +1226,23 @@ def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Opt
     t = _strip_delivery_noise(raw_text.lower())
 
     # 1. Durations — bare or "in N <unit>"
-    m = re.search(r"\b(\d+)\s+minute", t)
+    # BUG-FIX-AMZNOW: abbreviations "min"/"mins"/"hr"/"hrs" were silently
+    # dropped (parser only matched the full word "minute"/"hour"). Amazon Now
+    # widgets frequently render "in 30 mins" / "in 2 hrs", so this hid the
+    # fastest channel — the candidate was discarded and the slower Standard
+    # row won. Use a single word-boundary alternation that covers all forms.
+    m = re.search(r"\b(\d+)\s+(?:minutes?|mins?)\b", t)
     if m:
         return now + timedelta(minutes=int(m.group(1)))
-    m = re.search(r"\b(\d+)\s+hour", t)
+    m = re.search(r"\b(\d+)\s+(?:hours?|hrs?)\b", t)
     if m:
         return now + timedelta(hours=int(m.group(1)))
 
     # 2. Day spans — range first ("2-3 days" → low bound), then bare/in-prefixed
-    m = re.search(r"(\d+)\s*-\s*\d+\s+day", t)
+    m = re.search(r"(\d+)\s*-\s*\d+\s+days?\b", t)
     if m:
         return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
-    m = re.search(r"\b(\d+)\s+day", t)
+    m = re.search(r"\b(\d+)\s+days?\b", t)
     if m:
         return datetime.combine(today + timedelta(days=int(m.group(1))), dt_time(12, 0))
 
@@ -1283,7 +1250,7 @@ def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Opt
     # Step 3's single-date regex eats only the second number and we'd silently
     # report the slower end of the window.
     m = re.search(
-        r"\b(\d{1,2})\s*-\s*\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+        rf"\b(\d{{1,2}})\s*-\s*\d{{1,2}}\s+{_MONTH_PAT}\b",
         t,
     )
     if m:
@@ -1293,23 +1260,28 @@ def _parse_delivery_phrase(raw_text: str, now: Optional[datetime] = None) -> Opt
 
     # 3. Explicit date — try BEFORE "tomorrow"/weekday so a phrase like
     #    "Tomorrow, 20 May" lands on May 20 even if today isn't quite May 19.
-    month_pat = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
-    m = re.search(rf"\b(\d{{1,2}})\s+{month_pat}\b", t)
+    m = re.search(rf"\b(\d{{1,2}})\s+{_MONTH_PAT}\b", t)
     if m:
         dt = _resolve_month_day(now, _MONTHS[m.group(2)], int(m.group(1)))
         if dt:
             return dt
-    m = re.search(rf"\b{month_pat}\s+(\d{{1,2}})\b", t)
+    m = re.search(rf"\b{_MONTH_PAT}\s+(\d{{1,2}})\b", t)
     if m:
         dt = _resolve_month_day(now, _MONTHS[m.group(1)], int(m.group(2)))
         if dt:
             return dt
 
     # 4. Relative day
+    # BUG-FIX-AMZNOW: "tomorrow" → tomorrow at noon (well before any specific
+    # courier promise on that day). "today" → today at 20:00 (end of business)
+    # rather than noon, so a "10 minutes" / "2 hours" candidate captured at,
+    # say, 14:00 still sorts AHEAD of the generic "today" promise. Previously
+    # "today" at noon was already in the past for any afternoon scrape, which
+    # caused it to win against same-day minutes/hours candidates.
     if re.search(r"\btomorrow\b", t):
         return datetime.combine(today + timedelta(days=1), dt_time(12, 0))
     if re.search(r"\btoday\b", t):
-        return datetime.combine(today, dt_time(12, 0))
+        return datetime.combine(today, dt_time(20, 0))
 
     # 5. Weekday name
     today_idx = today.weekday()
@@ -1357,19 +1329,303 @@ def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
     return f"{channel} – {text}{free_label}"
 
 
-def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: logging.Logger) -> dict:
-    """
-    Extract ALL delivery options from the product page and return the earliest.
+# ── Containers we sweep for delivery text (priority order) ────────────────────
+# Each entry is (id, channel_hint). `channel_hint` is the default channel name
+# used when fragment text doesn't clearly say "minutes/hours" (which would mean
+# Amazon Now). When None, the channel is inferred per-fragment.
+_DELIVERY_CONTAINER_IDS: list = [
+    ("mir-layout-DELIVERY_BLOCK", None),
+    ("almLogoAndDeliveryMessage_feature_div", "Amazon Now"),
+    ("alm-delivery-message", "Amazon Now"),
+    ("almAvailability_feature_div", "Amazon Now"),
+    # BUG-FIX-AMZNOW: new buy-box accordion containers — when Amazon shows
+    # multiple fulfilment offers (Amazon Now + Standard), the Amazon Now row
+    # lives inside one of these and never inside the legacy `#alm-…` IDs.
+    # Without these, the structured sweep missed the "10 minutes" promise
+    # and the page-source fallback was the only chance to catch it.
+    ("qcomBuyBoxRow_feature_div", "Amazon Now"),
+    ("almOfferDisplay_feature_div", "Amazon Now"),
+    ("mbc", None),                   # Multiple Buying Choices wrapper
+    ("newAccordionRow_0", None),     # first accordion row (often Amazon Now)
+    ("newAccordionRow_1", None),     # second accordion row
+    ("newAccordionRow_2", None),
+    ("promiseMessage_feature_div", None),
+    ("buybox-default_feature_div", None),
+    ("deliveryBlockMessage", None),
+    ("deliveryMessageMirWidget", None),
+    ("ddmDeliveryMessage", None),
+    ("freshDeliveryMessage_feature_div", "Amazon Fresh"),
+    ("apex_desktop", None),       # broader buy-box container
+    ("desktop_buybox", None),
+    ("rightCol", None),            # last-resort whole-right-column sweep
+]
 
-    Verifies the page has updated to expected_pincode before reading delivery
-    dates, preventing the stale-data bug where all pincodes show the same date.
+# Slot IDs we read individually so the source tag is precise.
+_DELIVERY_SLOT_SELECTORS: list = [
+    ("primary-large",   "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",   None),
+    ("primary-small",   "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_SMALL",   None),
+    ("secondary-large", "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE", None),
+    ("secondary-small", "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_SMALL", None),
+    ("promise",         "#mir-layout-DELIVERY_BLOCK-slot-PROMISE_HOLDER_DELIVERY_MESSAGE_LARGE", None),
+    ("ub-delivery",     "#mir-layout-DELIVERY_BLOCK-slot-UB_DELIVERY_BLOCK",                None),
+    ("alm-delivery",    "#alm-delivery-message",                                            "Amazon Now"),
+    ("alm-availability","#almAvailability_feature_div .primary-availability-message",      "Amazon Now"),
+    ("fresh-delivery",  "#freshDeliveryMessage_feature_div",                                None),
+    ("ddm-message",     "#ddmDeliveryMessage",                                              None),
+    ("mir-widget",      "#deliveryMessageMirWidget",                                        None),
+]
+
+# Phrase patterns scanned out of free-text. Any match is fed to
+# `_parse_delivery_phrase`; non-parseable matches are dropped silently.
+_DATE_PHRASE_RE = re.compile(
+    r"(?:FREE\s+)?(?:Or\s+fastest\s+)?delivery\s+(?:in\s+)?"
+    r"(?:\d+\s+(?:minutes?|mins?|hours?|hrs?|days?)"
+    r"|today\b[^.<\"\n]{0,80}"
+    r"|tomorrow\b[^.<\"\n]{0,80}"
+    r"|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b[^.<\"\n]{0,80}"
+    r"|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[^.<\"\n]{0,30})",
+    re.IGNORECASE,
+)
+
+# Fallback patterns when there's no leading "delivery" keyword — picks up bare
+# "Today, 12 PM" / "Tomorrow, 20 May" / "Thursday, 22 May" inside slot text.
+_BARE_DATE_PHRASE_RE = re.compile(
+    r"\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    r"[^.<\"\n]{0,80}",
+    re.IGNORECASE,
+)
+
+# Duration patterns ("10 minutes", "2 hours") that don't need the word "delivery"
+# preceding them — common in Amazon Now widgets.
+_BARE_DURATION_RE = re.compile(
+    r"\b\d+\s+(?:minutes?|mins?|hours?|hrs?)\b[^.<\"\n]{0,60}",
+    re.IGNORECASE,
+)
+
+
+def _delivery_debug_dir(logger: logging.Logger) -> Optional[Path]:
+    """Derive a forensics dump folder from the logger's file handler.
+
+    Returns <log-dir>/delivery_debug/ or None if the logger has no file handler.
+    """
+    try:
+        for h in logger.handlers:
+            base = getattr(h, "baseFilename", None)
+            if base:
+                d = Path(base).resolve().parent / "delivery_debug"
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+    except Exception:
+        pass
+    return None
+
+
+def _dump_delivery_html(
+    driver: Chrome, asin_hint: str, pincode: str, dump_dir: Path, reason: str
+) -> None:
+    """Save a snapshot of every known delivery container for forensic post-mortem.
+
+    Called when zero candidates are found OR at INFO/DEBUG cadence on first hit
+    per pincode. File is text — opens in any editor.
+    """
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_asin = re.sub(r"[^A-Za-z0-9_-]", "_", asin_hint or "noasin")
+        out = dump_dir / f"{safe_asin}_{pincode}_{ts}_{reason}.html"
+        chunks = [f"<!-- reason={reason} pincode={pincode} ts={ts} -->\n"]
+        for cid, _ in _DELIVERY_CONTAINER_IDS:
+            try:
+                el = driver.find_element(By.ID, cid)
+                html = el.get_attribute("outerHTML") or ""
+                chunks.append(f"\n<!-- ===== #{cid} ===== -->\n{html}\n")
+            except Exception:
+                continue
+        # Also dump the contextual pincode label so we can verify what Amazon
+        # thinks the active pincode is at the moment of extraction.
+        try:
+            label = driver.find_element(By.ID, "contextualIngressPtLabel_deliveryShortLine")
+            chunks.append(
+                f"\n<!-- ===== #contextualIngressPtLabel_deliveryShortLine ===== -->\n"
+                f"{label.get_attribute('outerHTML') or ''}\n"
+            )
+        except Exception:
+            pass
+        out.write_text("".join(chunks), encoding="utf-8")
+    except Exception:
+        pass  # Never let dumping crash a scrape
+
+
+def _infer_channel(text: str, hint: Optional[str]) -> str:
+    """Best-guess channel name from a delivery fragment."""
+    if hint:
+        return hint
+    low = text.lower()
+    if "amazon fresh" in low or "amazonfresh" in low:
+        return "Amazon Fresh"
+    if "amazon now" in low or re.search(r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b", low):
+        return "Amazon Now"
+    if re.search(r"\bprime\b", low):
+        return "Prime"
+    return "Standard"
+
+
+def _is_free(text: str) -> bool:
+    low = text.lower()
+    return bool(re.search(r"\bfree\b|₹\s*0\b|no\s+charge", low))
+
+
+# BUG-FIX-AMZNOW: Pure-Python earliest-delivery resolver.
+# Selenium-free so it's unit-testable; called from `extract_all_delivery_options`
+# for the page-source / container-text path AND used directly by the test suite
+# in tests/test_delivery_parser.py.
+def extract_earliest_delivery_from_text(
+    text: str,
+    default_channel: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Scan a blob of text for every delivery promise and return the earliest.
+
+    Used by both the live scraper (to consolidate the page-source / container
+    fallback) and the unit tests (to validate priority ordering without spinning
+    up Chrome).
+
+    Priority is enforced *implicitly* by the datetime each candidate parses to:
+      minutes-based  →  now + N min       (earliest)
+      hours-based    →  now + N hours
+      same-day/today →  today at noon
+      tomorrow       →  tomorrow at noon
+      explicit date  →  that date at noon
+      weekday name   →  next occurrence at noon
+      unparseable    →  dropped
+
+    Returns ``{"earliest_display", "earliest_dt", "is_free", "all_options"}``.
+    On no parseable match, ``earliest_display`` is "Not Available".
+    """
+    if now is None:
+        now = datetime.now()
+    result: dict = {
+        "earliest_display": "Not Available",
+        "earliest_dt": None,
+        "is_free": False,
+        "all_options": [],
+    }
+    if not text:
+        return result
+
+    candidates: List[Tuple[str, str, bool, datetime]] = []
+    seen_phrases: set = set()
+
+    def _line_around(idx: int) -> str:
+        # BUG-FIX-AMZNOW: channel inference used to run only on the regex match
+        # itself, so "Amazon Fresh Delivery in 2 hours" inferred Standard because
+        # the captured "Delivery in 2 hours" had no channel keyword. Look at the
+        # enclosing line for hints like "Amazon Fresh" / "Prime".
+        start = text.rfind("\n", 0, idx) + 1
+        end = text.find("\n", idx)
+        if end == -1:
+            end = len(text)
+        return text[start:end]
+
+    def _ingest(match_start: int, raw: str) -> None:
+        raw = re.sub(r"\s+", " ", raw or "").strip(" .,")
+        if not raw or len(raw) < 4:
+            return
+        low = raw.lower()
+        # Skip fragments that obviously aren't delivery promises
+        if not any(kw in low for kw in (
+            "today", "tomorrow", "min", "hour", "day", "week",
+            "jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec",
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        )):
+            return
+        dt = _parse_delivery_phrase(raw, now)
+        if dt is None:
+            return
+        key = (raw.lower(), dt)
+        if key in seen_phrases:
+            return
+        seen_phrases.add(key)
+        # Channel inference: try (default → line context → fragment text).
+        ch = default_channel or _infer_channel(_line_around(match_start), None)
+        if ch == "Standard":
+            # Last attempt — maybe the raw fragment itself has the channel keyword.
+            ch = _infer_channel(raw, None)
+        candidates.append((ch, raw, _is_free(raw), dt))
+
+    # Pass 1 — phrases anchored on the word "delivery"
+    for m in _DATE_PHRASE_RE.finditer(text):
+        _ingest(m.start(), m.group(0))
+    # Pass 2 — bare durations ("10 minutes", "2 hrs") which Amazon Now widgets
+    # render without a leading "delivery" keyword
+    for m in _BARE_DURATION_RE.finditer(text):
+        _ingest(m.start(), m.group(0))
+    # Pass 3 — bare date phrases ("Tomorrow, 31 May", "Monday, June 3")
+    for m in _BARE_DATE_PHRASE_RE.finditer(text):
+        _ingest(m.start(), m.group(0))
+
+    if not candidates:
+        return result
+
+    candidates.sort(key=lambda c: c[3])
+    # Dedup by (channel, lowercased display string) so "FREE delivery in 10
+    # minutes on orders over ₹149" and the bare "10 minutes on orders over ₹149"
+    # don't both appear in the option list.
+    deduped: List[Tuple[str, str, bool, datetime]] = []
+    seen_display: set = set()
+    for ch, raw, free, dt in candidates:
+        disp_key = (ch, _build_delivery_display(ch, raw, free).lower())
+        if disp_key in seen_display:
+            continue
+        seen_display.add(disp_key)
+        deduped.append((ch, raw, free, dt))
+
+    earliest_ch, earliest_raw, earliest_free, earliest_dt = deduped[0]
+    result["earliest_display"] = _build_delivery_display(
+        earliest_ch, earliest_raw, earliest_free
+    )
+    result["earliest_dt"] = earliest_dt
+    result["is_free"] = earliest_free
+    result["all_options"] = [
+        {
+            "channel": ch,
+            "raw_text": raw,
+            "display_text": _build_delivery_display(ch, raw, free),
+            "delivery_dt": dt,
+            "is_free": free,
+        }
+        for ch, raw, free, dt in deduped
+    ]
+    return result
+
+
+def extract_all_delivery_options(
+    driver: Chrome,
+    expected_pincode: str,
+    logger: logging.Logger,
+    asin_hint: str = "",
+) -> dict:
+    """Brute-force extractor: read every delivery-bearing element on the page,
+    parse every date/time phrase, return the earliest.
+
+    Strategy (high → low precision):
+      A. Verify pincode actually applied on the page  (`contextualIngressPtLabel`)
+      B. DEX attributes  (`data-csa-c-delivery-time` / `data-csa-c-delivery-price`)
+      C. Known slot IDs  (PRIMARY / SECONDARY / PROMISE / ALM / Fresh / …)
+      D. Wildcard slot scan  (`[id*="DELIVERY_BLOCK-slot"]`)
+      E. Container innerText sweep  (mir-layout, alm, rightCol, …)
+      F. Page-source regex fallback over the entire HTML
+
+    Every candidate goes through `_parse_delivery_phrase` so they all sort on
+    the same real datetime — no minute-bucket ties, no per-channel priority.
 
     Returns:
         {
-            "earliest_display": str,   # goes in Excel col M
-            "is_free":          bool,  # goes in Excel col N
-            "all_options":      list,  # for debug logging
-            "pincode_verified": bool,  # logged only, not in Excel
+            "earliest_display": str,
+            "is_free":          bool,
+            "all_options":      list,
+            "pincode_verified": bool,
         }
     """
     result: dict = {
@@ -1378,30 +1634,35 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
         "all_options": [],
         "pincode_verified": False,
     }
+    debug_dir = _delivery_debug_dir(logger)
+    now = datetime.now()
 
-    # STEP A — Verify pincode updated on the product page.
-    # #contextualIngressPtLabel_deliveryShortLine shows "Deliver to  Mumbai 400001".
-    # We wait until the expected pincode number appears there before reading delivery.
+    # ── STEP A. Verify pincode actually applied ───────────────────────────────
     try:
-        WebDriverWait(driver, 10).until(
-            lambda d: expected_pincode in
-            d.find_element(By.ID, "contextualIngressPtLabel_deliveryShortLine").text
+        WebDriverWait(driver, 12).until(
+            lambda d: expected_pincode in (
+                d.find_element(By.ID, "contextualIngressPtLabel_deliveryShortLine").text or ""
+            )
         )
         result["pincode_verified"] = True
-        logger.debug(f"Pincode {expected_pincode} confirmed on product page.")
+        logger.info(f"[{asin_hint}][{expected_pincode}] Pincode confirmed on product page.")
     except Exception:
         logger.warning(
-            f"Could not verify pincode {expected_pincode} on product page — "
-            f"falling back to 3s sleep. Delivery dates may be inaccurate."
+            f"[{asin_hint}][{expected_pincode}] Could not verify pincode label — "
+            f"delivery data may be stale. Proceeding with 3s grace sleep."
         )
         time.sleep(3)
 
-    # ROBUST-FIX: Build a delivery option from a raw phrase using the date-object
-    # parser. The same builder is used by every source (DEX attribute, structured
-    # slot CSS, fastest sibling slot, container-text scan, page-source regex) so
-    # all candidates are evaluated on the same, real datetime — no minute-bucket
-    # ties, no slot-priority bias, no keyword whack-a-mole.
-    now = datetime.now()
+    # ── STEP A2. Wait for delivery widget to render with non-empty content ───
+    # `wait_for_delivery_block` checks innerText length, not just presence.
+    delivery_ready = wait_for_delivery_block(driver, timeout=15)
+    if not delivery_ready:
+        logger.warning(
+            f"[{asin_hint}][{expected_pincode}] Delivery widget did not populate "
+            f"within 15s — dumping HTML for post-mortem."
+        )
+        if debug_dir:
+            _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "widget_empty")
 
     def _make_option(channel: str, raw_text: str, is_free: bool) -> Optional[dict]:
         raw_text = (raw_text or "").strip()
@@ -1413,7 +1674,6 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
             "raw_text": raw_text,
             "display_text": _build_delivery_display(channel, raw_text, is_free),
             "delivery_dt": dt,
-            # Minutes-from-now kept for log readability; sort key is delivery_dt.
             "sort_minutes": max(0, int((dt - now).total_seconds() // 60)) if dt else 999999,
             "is_free": is_free,
         }
@@ -1421,110 +1681,149 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
     def _add(opt: Optional[dict], source: str) -> None:
         if not opt:
             return
+        # Skip unparseable phrases — they'd sort last and never win, but they
+        # pollute the candidate list and confuse the log.
+        if opt["delivery_dt"] is None:
+            logger.debug(
+                f"[{asin_hint}][{expected_pincode}] [{source}] dropped (unparseable): "
+                f"{opt['raw_text']!r}"
+            )
+            return
         result["all_options"].append(opt)
         logger.debug(
-            f"Delivery option [{source}]: {opt['display_text']!r} "
-            f"dt={opt['delivery_dt']} (raw={opt['raw_text']!r})"
+            f"[{asin_hint}][{expected_pincode}] [{source}] {opt['display_text']!r} "
+            f"dt={opt['delivery_dt']} raw={opt['raw_text']!r}"
         )
 
-    # STEP B — DEX unified widget: each span carries a clean date in
-    # data-csa-c-delivery-time and the cost class in data-csa-c-delivery-price.
+    # ── STEP B. DEX attributes (cleanest data when present) ──────────────────
     try:
-        for dex_el in driver.find_elements(By.CSS_SELECTOR, "span[data-csa-c-delivery-time]"):
-            val = (dex_el.get_attribute("data-csa-c-delivery-time") or "").strip()
+        for el in driver.find_elements(By.CSS_SELECTOR, "[data-csa-c-delivery-time]"):
+            val = (el.get_attribute("data-csa-c-delivery-time") or "").strip()
             if not val or not any(c.isalpha() for c in val):
                 continue
-            price_attr = (dex_el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
-            is_free = price_attr == "free" or "free" in val.lower()
-            _add(_make_option("Standard", val, is_free), "DEX")
-    except Exception:
-        pass
+            price_attr = (el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
+            free = price_attr == "free" or _is_free(val)
+            ch = _infer_channel(val, None)
+            _add(_make_option(ch, val, free), "DEX")
+    except Exception as e:
+        logger.debug(f"DEX scan failed: {e}")
 
-    # STEP C — Structured per-channel reads (Amazon Now ALM, Standard PRIMARY,
-    # Standard SECONDARY "Or fastest delivery"). Each match becomes its own
-    # option — no "first wins" cutoff per channel.
-    for channel_def in _DELIVERY_CHANNEL_SELECTORS:
-        channel_name = channel_def["channel"]
-
-        for selector in channel_def["selectors"]:
-            try:
-                el = WebDriverWait(driver, 5).until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
-                if not text or not any(kw in text.lower() for kw in channel_def["keywords"]):
-                    continue
-                is_free = any(w in text.lower() for w in ["free", "₹0", "no charge"])
-                _add(_make_option(channel_name, text, is_free), f"{channel_name}/primary")
-                break
-            except Exception:
-                continue
-
-        for selector in channel_def.get("fastest_selectors", []):
-            try:
-                for el in driver.find_elements(By.CSS_SELECTOR, selector):
-                    text = re.sub(r"\s+", " ", (el.text or el.get_attribute("textContent") or "")).strip()
-                    if not text or not any(kw in text.lower() for kw in channel_def["keywords"]):
-                        continue
-                    is_free = any(w in text.lower() for w in ["free", "₹0", "no charge"])
-                    _add(_make_option(channel_name, text, is_free), f"{channel_name}/fastest")
-            except Exception:
-                continue
-
-    # STEP D — Robust whole-container scan. Read the entire MIR delivery block
-    # text and extract every date-bearing fragment. This catches options Amazon
-    # adds with new slot ids or wording variants we haven't enumerated above.
-    CONTAINER_IDS = ["mir-layout-DELIVERY_BLOCK", "almLogoAndDeliveryMessage_feature_div"]
-    for container_id in CONTAINER_IDS:
+    # ── STEP C. Known slot IDs (per-element reads) ───────────────────────────
+    for tag, selector, hint in _DELIVERY_SLOT_SELECTORS:
         try:
-            container = driver.find_element(By.ID, container_id)
+            for el in driver.find_elements(By.CSS_SELECTOR, selector):
+                text = re.sub(
+                    r"\s+", " ",
+                    (el.text or el.get_attribute("textContent") or ""),
+                ).strip()
+                if not text:
+                    continue
+                ch = _infer_channel(text, hint)
+                _add(_make_option(ch, text, _is_free(text)), f"slot/{tag}")
+        except Exception as e:
+            logger.debug(f"Slot scan ({tag}) failed: {e}")
+
+    # ── STEP D. Wildcard slot scan (catches new slot IDs Amazon adds) ────────
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, "[id*='DELIVERY_BLOCK-slot']"):
+            slot_id = el.get_attribute("id") or "unknown-slot"
+            text = re.sub(
+                r"\s+", " ",
+                (el.text or el.get_attribute("textContent") or ""),
+            ).strip()
+            if not text:
+                continue
+            ch = _infer_channel(text, None)
+            _add(_make_option(ch, text, _is_free(text)), f"wildcard/{slot_id}")
+    except Exception as e:
+        logger.debug(f"Wildcard slot scan failed: {e}")
+
+    # ── STEP E. Container innerText sweep (whole-block fragmentation) ────────
+    # For each container, split by "Or fastest", bullets, newlines AND by
+    # date-phrase regex. Each fragment is independently parsed.
+    for cid, default_hint in _DELIVERY_CONTAINER_IDS:
+        try:
+            container = driver.find_element(By.ID, cid)
             block_text = re.sub(
                 r"\s+", " ",
                 (container.text or container.get_attribute("textContent") or ""),
             ).strip()
             if not block_text:
                 continue
-            # Split on segment boundaries Amazon uses between options.
-            # Don't split on the bare period before "Order within ..." because
-            # that fragment is per-option, not an option separator.
-            fragments = re.split(r"\s+Or\s+(?=fastest)|\s*•\s*|\n+", block_text)
+            # Coarse split: "Or fastest", bullets, line breaks
+            fragments = re.split(
+                r"\s+Or\s+(?=fastest)|\s*•\s*|\n+",
+                block_text, flags=re.IGNORECASE,
+            )
+            # Plus a regex-based extraction of any date-bearing phrase inside
+            # the block, in case the coarse split missed an option.
+            for m in _DATE_PHRASE_RE.finditer(block_text):
+                fragments.append(m.group(0))
+            for m in _BARE_DURATION_RE.finditer(block_text):
+                fragments.append(m.group(0))
             for frag in fragments:
                 frag = frag.strip()
                 if len(frag) < 4:
                     continue
-                dt = _parse_delivery_phrase(frag, now)
-                if dt is None:
+                # Cheap pre-filter — skip fragments that obviously aren't dates
+                low = frag.lower()
+                if not any(kw in low for kw in (
+                    "today", "tomorrow", "min", "hour", "day",
+                    "jan", "feb", "mar", "apr", "may", "jun",
+                    "jul", "aug", "sep", "oct", "nov", "dec",
+                    "monday", "tuesday", "wednesday", "thursday",
+                    "friday", "saturday", "sunday",
+                )):
                     continue
-                channel_name = "Amazon Now" if re.search(r"\b(minutes?|hours?)\b", frag.lower()) else "Standard"
-                is_free = bool(re.search(r"\bfree\b|₹0", frag.lower()))
-                _add(_make_option(channel_name, frag, is_free), f"{container_id}/scan")
+                ch = _infer_channel(frag, default_hint)
+                _add(_make_option(ch, frag, _is_free(frag)), f"container/{cid}")
         except Exception:
             continue
 
-    # STEP E — Page-source regex fallback when every structured read missed.
-    if not result["all_options"]:
-        try:
-            source = driver.page_source or ""
-            m = re.search(r"(FREE delivery in \d+ minutes[^\"<]{0,60})", source, re.IGNORECASE)
-            if m:
-                _add(_make_option("Amazon Now", m.group(1).strip(), True), "page-source")
-            m = re.search(
-                r"((?:Tomorrow|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
-                r"[^\"<\n]{0,50})",
-                source, re.IGNORECASE,
-            )
-            if m:
-                raw = m.group(1).strip()
-                _add(_make_option("Standard", raw, "free" in raw.lower()), "page-source")
-        except Exception as e:
-            logger.warning(f"Page source delivery fallback failed: {e}")
+    # ── STEP F. Page-source regex fallback over the entire HTML ──────────────
+    # Catches options that live in inline JSON / data attributes the structured
+    # readers miss entirely.
+    # BUG-FIX-AMZNOW: The 200 KB cap used to truncate page_source before the
+    # accordion's second buy-box row on Amazon Now listings — the Amazon Now
+    # promise was inside the rendered HTML but past the cap, so it was never
+    # parsed. Scan the full HTML now; regex is linear and still cheap (<50 ms
+    # on a 1 MB page).
+    try:
+        source = driver.page_source or ""
+        for m in _DATE_PHRASE_RE.finditer(source):
+            raw = re.sub(r"\s+", " ", m.group(0)).strip()
+            ch = _infer_channel(raw, None)
+            _add(_make_option(ch, raw, _is_free(raw)), "page-source/delivery")
+        for m in _BARE_DURATION_RE.finditer(source):
+            raw = re.sub(r"\s+", " ", m.group(0)).strip()
+            # Bare durations in product pages are almost always Amazon Now.
+            _add(_make_option("Amazon Now", raw, _is_free(raw)), "page-source/duration")
+        for m in _BARE_DATE_PHRASE_RE.finditer(source):
+            raw = re.sub(r"\s+", " ", m.group(0)).strip()
+            ch = _infer_channel(raw, None)
+            _add(_make_option(ch, raw, _is_free(raw)), "page-source/bare-date")
+    except Exception as e:
+        logger.debug(f"Page-source fallback failed: {e}")
 
-    # STEP F — Dedup, sort by real datetime, pick earliest.
+    # ── STEP F2. Whole-page innerText fallback ───────────────────────────────
+    # BUG-FIX-AMZNOW: when Amazon Now content arrives via an inline React
+    # hydration script (no static HTML), `driver.page_source` misses it but
+    # `document.body.innerText` has it. Run the same parser on the rendered
+    # body text as a last-chance net.
+    try:
+        body_text = driver.execute_script(
+            "return (document.body && document.body.innerText) || '';"
+        ) or ""
+        if body_text:
+            text_result = extract_earliest_delivery_from_text(body_text, None, now)
+            for opt in text_result["all_options"]:
+                _add(_make_option(opt["channel"], opt["raw_text"], opt["is_free"]),
+                     "body-innertext")
+    except Exception as e:
+        logger.debug(f"Body innerText fallback failed: {e}")
+
+    # ── STEP G. Dedup, sort by real datetime, pick earliest ─────────────────
     if result["all_options"]:
-        # Dedup by normalised display_text — collapses the same option seen
-        # via multiple sources (DEX attr + slot CSS + container scan all
-        # produce e.g. "Standard – Tomorrow, 20 May") while keeping genuinely
-        # distinct options like PRIMARY vs SECONDARY.
         seen: set = set()
         unique = []
         for opt in result["all_options"]:
@@ -1533,20 +1832,25 @@ def extract_all_delivery_options(driver: Chrome, expected_pincode: str, logger: 
                 continue
             seen.add(key)
             unique.append(opt)
+        unique.sort(key=lambda o: o["delivery_dt"] or datetime.max)
         result["all_options"] = unique
 
-        # Sort by delivery_dt — options that couldn't be parsed (None) sort last.
-        far_future = datetime.max
-        result["all_options"].sort(key=lambda o: o["delivery_dt"] or far_future)
-
-        earliest = result["all_options"][0]
+        earliest = unique[0]
         result["earliest_display"] = earliest["display_text"]
         result["is_free"] = earliest["is_free"]
-        logger.debug(
-            f"Earliest delivery: {earliest['display_text']} "
-            f"@ {earliest['delivery_dt']} ({earliest['sort_minutes']} min) | "
-            f"All: {[(o['display_text'], str(o['delivery_dt'])) for o in result['all_options']]}"
+        logger.info(
+            f"[{asin_hint}][{expected_pincode}] EARLIEST: {earliest['display_text']!r} "
+            f"@ {earliest['delivery_dt']} ({earliest['sort_minutes']} min from now) "
+            f"| candidates={len(unique)}"
         )
+    else:
+        # Zero candidates — dump HTML so we can post-mortem what Amazon served.
+        logger.warning(
+            f"[{asin_hint}][{expected_pincode}] No delivery options found by any source. "
+            f"Dumping delivery container HTML for forensics."
+        )
+        if debug_dir:
+            _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "zero_candidates")
 
     return result
 
@@ -1717,25 +2021,87 @@ def wait_for_pincode_confirmation(driver: Chrome, expected_pincode: str, timeout
     return False  # BUG-FIX
 
 
-# BUG-FIX: Wait for delivery block to be present before extracting date.
-# Prevents reading a blank or stale delivery element on a fresh product page.
-def wait_for_delivery_block(driver: Chrome, timeout: int = 8) -> bool:
-    """Wait for at least one delivery element to be visible on the page."""
-    DELIVERY_PRESENCE_SELECTORS = [  # BUG-FIX
-        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",  # BUG-FIX
-        "#alm-delivery-message",  # BUG-FIX
-        "#ddmDeliveryMessage",  # BUG-FIX
-        "#deliveryMessageMirWidget",  # BUG-FIX
-    ]
-    for sel in DELIVERY_PRESENCE_SELECTORS:  # BUG-FIX
-        try:  # BUG-FIX
-            WebDriverWait(driver, timeout).until(  # BUG-FIX
-                EC.presence_of_element_located((By.CSS_SELECTOR, sel))  # BUG-FIX
-            )  # BUG-FIX
-            return True  # BUG-FIX
-        except Exception:  # BUG-FIX
-            continue  # BUG-FIX
-    return False  # BUG-FIX: caller proceeds with "Not Available"
+def wait_for_delivery_block(driver: Chrome, timeout: int = 15) -> bool:
+    """Wait until ANY delivery element has rendered with non-empty text.
+
+    Critical: Amazon's delivery widget is Ajax-driven. The slot element appears
+    in the DOM almost immediately but stays empty for ~1–3s after a pincode
+    change while the new courier promise is fetched. Waiting only on element
+    presence (the old behavior) read a blank/stale widget and silently produced
+    "Not Available" or the previous pincode's date.
+
+    This wait polls for ANY of these conditions, all at once (not sequentially):
+      - `[data-csa-c-delivery-time]` element exists  (DEX unified widget)
+      - any `[id*='DELIVERY_BLOCK-slot']` has non-empty text  (MIR slots — covers
+        PRIMARY, SECONDARY, PROMISE_HOLDER, UB, and any future variant)
+      - `#alm-delivery-message` has non-empty text  (Amazon Now / ALM)
+      - `#deliveryBlockMessage` or `#ddmDeliveryMessage` has non-empty text
+        (legacy widgets still seen on some product categories)
+    """
+    # BUG-FIX-AMZNOW: We now wait for the *combined* set of channels — if an
+    # Amazon Now / Fresh / accordion container is present, wait for IT to be
+    # populated even after a MIR slot fills. Otherwise the scraper used to
+    # rush ahead while the faster channel was still loading, then read a
+    # page-source snapshot that only contained the Standard row.
+    def _ready(d) -> bool:
+        try:
+            js = """
+              return (function(){
+                var primarySels = [
+                  '[data-csa-c-delivery-time]',
+                  '[id*=\"DELIVERY_BLOCK-slot\"]',
+                  '#alm-delivery-message',
+                  '#deliveryBlockMessage',
+                  '#ddmDeliveryMessage',
+                  '#deliveryMessageMirWidget'
+                ];
+                var fastSels = [
+                  '#qcomBuyBoxRow_feature_div',
+                  '#almOfferDisplay_feature_div',
+                  '#almLogoAndDeliveryMessage_feature_div',
+                  '#alm-delivery-message',
+                  '#freshDeliveryMessage_feature_div',
+                  '#newAccordionRow_0',
+                  '#newAccordionRow_1',
+                  '#mbc'
+                ];
+                function nonEmpty(sels){
+                  for (var i = 0; i < sels.length; i++) {
+                    var nodes = document.querySelectorAll(sels[i]);
+                    for (var j = 0; j < nodes.length; j++) {
+                      var t = (nodes[j].innerText || nodes[j].textContent || '').trim();
+                      if (t.length > 0) return true;
+                      if (sels[i] === '[data-csa-c-delivery-time]') {
+                        var a = nodes[j].getAttribute('data-csa-c-delivery-time') || '';
+                        if (a.trim().length > 0) return true;
+                      }
+                    }
+                  }
+                  return false;
+                }
+                function present(sels){
+                  for (var i = 0; i < sels.length; i++) {
+                    if (document.querySelector(sels[i])) return true;
+                  }
+                  return false;
+                }
+                var primary = nonEmpty(primarySels);
+                if (!primary) return false;
+                // If a fast-channel container exists in the DOM, wait for it
+                // to be populated too — otherwise we may scrape a stale snapshot
+                // that hides the Amazon Now / Fresh promise.
+                if (present(fastSels)) return nonEmpty(fastSels);
+                return true;
+              })();
+            """
+            return bool(d.execute_script(js))
+        except Exception:
+            return False
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=0.4).until(_ready)
+        return True
+    except Exception:
+        return False
 
 
 def validate_page_is_product(driver: Chrome, asin: str) -> str:
@@ -1875,15 +2241,11 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
     price = extract_price(driver, logger)
     discount = compute_discount(mrp, price)
     availability = extract_availability(driver, logger)
-    delivery_result = extract_all_delivery_options(driver, pincode, logger)
+    delivery_result = extract_all_delivery_options(driver, pincode, logger, asin_hint=asin)
     delivery = delivery_result["earliest_display"]
     free_delivery = "Yes" if delivery_result["is_free"] else "No"
     if not delivery_result["pincode_verified"]:
         logger.warning(f"[{asin}][{pincode}] Delivery read without pincode confirmation — data may be stale.")
-    logger.debug(
-        f"[{asin}][{pincode}] Delivery options: "
-        f"{[o['display_text'] for o in delivery_result['all_options']]}"
-    )
     seller = extract_seller(driver, logger)
     rating = extract_rating(driver, logger)
     reviews = extract_review_count(driver, logger)
