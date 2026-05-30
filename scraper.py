@@ -2034,11 +2034,14 @@ def extract_all_delivery_options(
         time.sleep(3)
 
     # ── STEP B. Wait for delivery widget to render with non-empty content ────
-    delivery_ready = wait_for_delivery_block(driver, timeout=15)
+    # PERF-FIX: dropped from 15s → 8s. The wait condition is "any delivery
+    # widget populated" — 8s is generous; pages that haven't rendered by then
+    # have rendered nothing, and we fall through to Tier 4 ("Not Available").
+    delivery_ready = wait_for_delivery_block(driver, timeout=8)
     if not delivery_ready:
         logger.warning(
             f"[{asin_hint}][{expected_pincode}] Delivery widget did not populate "
-            f"within 15s — dumping HTML for post-mortem."
+            f"within 8s — dumping HTML for post-mortem."
         )
         if debug_dir:
             _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "widget_empty")
@@ -2267,16 +2270,19 @@ def wait_for_delivery_block(driver: Chrome, timeout: int = 15) -> bool:
       - `#deliveryBlockMessage` or `#ddmDeliveryMessage` has non-empty text
         (legacy widgets still seen on some product categories)
     """
-    # BUG-FIX-AMZNOW: We now wait for the *combined* set of channels — if an
-    # Amazon Now / Fresh / accordion container is present, wait for IT to be
-    # populated even after a MIR slot fills. Otherwise the scraper used to
-    # rush ahead while the faster channel was still loading, then read a
-    # page-source snapshot that only contained the Standard row.
+    # PERF-FIX: Reverted the overstrict "wait for fast-channel containers when
+    # present" condition. Amazon ships #mbc / #newAccordionRow_* / #qcomBuyBox*
+    # as EMPTY PLACEHOLDERS on most product pages even when there's no Amazon
+    # Now / Fresh offer for that pincode. Waiting for them to populate timed
+    # out at the full 15s on every scrape, costing ~90s per ASIN on 6 pincodes.
+    # We now wait only for "any one delivery widget populated" — same as the
+    # original. The tiered extractor handles the case where Amazon Now wasn't
+    # populated yet (Tier 1 returns None, Tier 2 takes over).
     def _ready(d) -> bool:
         try:
             js = """
               return (function(){
-                var primarySels = [
+                var sels = [
                   '[data-csa-c-delivery-time]',
                   '[id*=\"DELIVERY_BLOCK-slot\"]',
                   '#alm-delivery-message',
@@ -2284,43 +2290,18 @@ def wait_for_delivery_block(driver: Chrome, timeout: int = 15) -> bool:
                   '#ddmDeliveryMessage',
                   '#deliveryMessageMirWidget'
                 ];
-                var fastSels = [
-                  '#qcomBuyBoxRow_feature_div',
-                  '#almOfferDisplay_feature_div',
-                  '#almLogoAndDeliveryMessage_feature_div',
-                  '#alm-delivery-message',
-                  '#freshDeliveryMessage_feature_div',
-                  '#newAccordionRow_0',
-                  '#newAccordionRow_1',
-                  '#mbc'
-                ];
-                function nonEmpty(sels){
-                  for (var i = 0; i < sels.length; i++) {
-                    var nodes = document.querySelectorAll(sels[i]);
-                    for (var j = 0; j < nodes.length; j++) {
-                      var t = (nodes[j].innerText || nodes[j].textContent || '').trim();
-                      if (t.length > 0) return true;
-                      if (sels[i] === '[data-csa-c-delivery-time]') {
-                        var a = nodes[j].getAttribute('data-csa-c-delivery-time') || '';
-                        if (a.trim().length > 0) return true;
-                      }
+                for (var i = 0; i < sels.length; i++) {
+                  var nodes = document.querySelectorAll(sels[i]);
+                  for (var j = 0; j < nodes.length; j++) {
+                    var t = (nodes[j].innerText || nodes[j].textContent || '').trim();
+                    if (t.length > 0) return true;
+                    if (sels[i] === '[data-csa-c-delivery-time]') {
+                      var a = nodes[j].getAttribute('data-csa-c-delivery-time') || '';
+                      if (a.trim().length > 0) return true;
                     }
                   }
-                  return false;
                 }
-                function present(sels){
-                  for (var i = 0; i < sels.length; i++) {
-                    if (document.querySelector(sels[i])) return true;
-                  }
-                  return false;
-                }
-                var primary = nonEmpty(primarySels);
-                if (!primary) return false;
-                // If a fast-channel container exists in the DOM, wait for it
-                // to be populated too — otherwise we may scrape a stale snapshot
-                // that hides the Amazon Now / Fresh promise.
-                if (present(fastSels)) return nonEmpty(fastSels);
-                return true;
+                return false;
               })();
             """
             return bool(d.execute_script(js))
@@ -2428,9 +2409,9 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
 
     # Wait for product title to appear (adaptive — no fixed sleep)
     wait_for_product_page(driver, timeout=20)
-    # BUG-FIX: Wait for delivery block before any delivery extraction so we
-    # don't read a stale/blank element while Amazon's Ajax re-render is in flight.
-    wait_for_delivery_block(driver)  # BUG-FIX
+    # PERF-FIX: removed redundant wait_for_delivery_block() here — it's already
+    # called inside extract_all_delivery_options(). Calling it twice was costing
+    # up to 15s per scrape (×6 pincodes ≈ 90s wasted per ASIN).
 
     # Validate the page before extracting
     page_state = validate_page_is_product(driver, asin)
