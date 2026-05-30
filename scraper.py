@@ -1739,6 +1739,45 @@ def find_buy_box(driver: Chrome, logger: logging.Logger):
     return None
 
 
+# BUG-FIX-DEALBADGE: Amazon's buy box renders promotional badges that share
+# keywords with delivery phrases — "Today's Deal", "Limited Time Deal",
+# "Deal of the Day", etc. The bare-date regex matches "today" inside
+# "Today's Deal" and the parser resolves it to today's date — producing a
+# false positive like "Standard – Today'S Deal (Free)" in the Excel.
+#
+# Defense: in Tier 3 (buy-box innerText sweep), only accept lines that
+# contain a delivery-context keyword. Tier 1 and Tier 2 are already scoped
+# to delivery-specific containers (`alm-delivery`, `DELIVERY_BLOCK`, etc.)
+# so they can't see badge text.
+_DELIVERY_CONTEXT_RE = re.compile(
+    r"\bdelivery\b"
+    r"|\bdeliver\b"
+    r"|\barriv(?:e|es|ing)\b"
+    r"|\bship(?:s|ping|ped)?\b"
+    r"|\bget\s+it\b"
+    r"|\bfastest\b"
+    r"|\bfree\s+(?:delivery|shipping)\b"
+    r"|\bby\s+(?:today|tomorrow|mon|tue|wed|thu|fri|sat|sun"
+    r"|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+    re.IGNORECASE,
+)
+
+
+def _filter_delivery_lines(text: str) -> str:
+    """Keep only the lines of `text` that contain a delivery-context keyword.
+
+    Used by Tier 3 to skip promotional badges like "Today's Deal" / "Limited
+    Time Deal" that share words with our date regex.
+    """
+    if not text:
+        return ""
+    keep: list = []
+    for line in text.splitlines():
+        if _DELIVERY_CONTEXT_RE.search(line):
+            keep.append(line)
+    return "\n".join(keep)
+
+
 def _element_text(el) -> str:
     """Read an element's visible text, normalising whitespace. Returns ''."""
     try:
@@ -1885,7 +1924,18 @@ def _extract_buybox_fallback(
     if not inner:
         return None
 
-    text_result = extract_earliest_delivery_from_text(inner, None, now)
+    # BUG-FIX-DEALBADGE: drop lines without a delivery keyword so the bare-date
+    # regex doesn't match "Today's Deal" / "Limited Time Deal" / "Deal of the
+    # Day" promotional badges that sit next to the price in the buy box.
+    filtered = _filter_delivery_lines(inner)
+    if not filtered:
+        logger.warning(
+            f"[{asin_hint}][{pincode}] Tier 3: buy-box innerText has no "
+            f"delivery-context lines — skipping to avoid badge false positives."
+        )
+        return None
+
+    text_result = extract_earliest_delivery_from_text(filtered, None, now)
     if text_result["earliest_dt"] is None:
         return None
 
