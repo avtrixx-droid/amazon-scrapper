@@ -227,6 +227,75 @@ so all pincodes showed the first pincode's delivery date (stale-data copy bug).
 - Output format: `"Amazon Now – 10 Min (Free)"` / `"Standard – Tomorrow, 14 May (Free)"`
 - Returns `"Not Available"` for OOS items (never blank/None)
 
+**Follow-up (SENIOR-FIX-TIERED, 2026-05-30):** Replaced the old "collect every
+delivery-shaped string inside the buy box, sort by datetime, take the smallest" approach
+with a **tiered, early-return** extractor that mirrors Amazon's own DOM hierarchy. The old
+approach worked but was noisier (lots of regex passes, lots of dedup) and the output format
+("Amazon Now – 10 Minutes (Free)" / "Standard – Tomorrow, 31 May (Free)") leaked channel
+internals into the Excel column the vendor reads.
+
+`extract_all_delivery_options` now runs four tiers, scoped to the buy box:
+
+| Tier | Selector | Behaviour |
+|---|---|---|
+| 1 — Amazon Now | `[id*='alm-delivery' i], [id*='qcomBuyBox' i], [id*='almOfferDisplay' i]` + `img[alt*='Amazon Now' i]` ancestor | If ANY element has parseable text → return `Amazon Now – <duration>`. **Trust Amazon**, do not compare against Tier 2. |
+| 2 — Standard | `[id*='DELIVERY_BLOCK' i], [id*='deliveryBlock' i], [id*='deliveryMessage' i], [id*='promiseMessage' i]` | Read all matches, parse every phrase inside (so #deliveryBlockMessage's PRIMARY + SECONDARY children are both captured), pick the **earliest** by datetime regardless of price. |
+| 3 — Buy-box fallback | `buy_box.innerText` regex sweep | Only when Tiers 1+2 returned nothing. Logged as WARNING so the new container ID can be added to Tier 1/2. |
+| 4 — Not Available | — | All tiers missed. HTML dumped to `logs/delivery_debug/` for forensics. |
+
+CSS `[id*='…' i]` is **regex on IDs in CSS form**. The substring + case-insensitive flag
+means new slot suffixes Amazon ships (a hypothetical `…_TERTIARY_DELIVERY_MESSAGE_LARGE`)
+are picked up automatically — no code change. The constants live at
+[scraper.py](AmazonScraper/scraper.py) as `_AMAZON_NOW_SELECTOR` and
+`_STANDARD_DELIVERY_SELECTOR`.
+
+**Output format** (user-confirmed, written to Excel col M `Earliest Delivery`):
+- Tier 1 hit → `Amazon Now – 10 Minutes` / `Amazon Now – 2 Hours`
+- Tier 2/3 hit → `Tomorrow, 31 May` / `Today` / `2 June` (no channel prefix, no `(Free)`)
+- Tier 4 → `Not Available`
+
+The price flag still lives in the separate `Free Delivery` column (col N).
+
+The result dict now includes `"tier": "amazon_now" | "standard" | "fallback" | "none"` so
+log analysis can confirm which tier won per scrape.
+
+New helpers: `_clean_delivery_text`, `_build_amazon_now_display`, `_build_standard_display`,
+`_extract_amazon_now`, `_extract_standard_delivery`, `_extract_buybox_fallback`. The pure
+`extract_earliest_delivery_from_text` helper is kept — it's reused by Tier 2 (to enumerate
+multiple phrases inside one container) and by Tier 3 (last-resort sweep), and remains
+unit-testable without Selenium.
+
+Test coverage in `tests/test_delivery_parser.py` (69 cases):
+`NewDisplayBuilderTests`, `Tier1AmazonNowTests`, `Tier2StandardDeliveryTests`,
+`Tier3FallbackTests`, `TieredFlowIntegrationTests` — plus all the previous parser /
+buy-box / scoping coverage. Run: `python -m unittest tests.test_delivery_parser`.
+
+**Follow-up (SENIOR-FIX-BUYBOX, 2026-05-30):** Even with all the parser fixes below, the
+extractor was reading "today" / "tomorrow" / weekday names from anywhere on the page —
+customer reviews ("today my package arrived"), product description ("Get yours today!"),
+Q&A ("Will this arrive Monday?"), Frequently-Bought-Together, recommendation carousels.
+Any of those would race the real delivery promise and could win the `datetime` sort.
+
+**The contract is now: every delivery read must be scoped to the buy box.** The buy box is
+the right-hand offer panel that holds Price + Availability + Quantity + Add to Cart + Buy Now
++ Delivery + Sold by + Ships from + Payment. `find_buy_box(driver, logger)` returns that
+element; `extract_all_delivery_options` calls it first and then runs DEX / slot / wildcard /
+container / HTML / innerText reads via `buy_box.find_elements(...)` so nothing outside the
+panel is ever parsed.
+
+`find_buy_box` ranks candidates by `_score_buy_box_candidate(el)` (0–6 from CTA presence,
+price element, quantity, sold-by, delivery block, availability). It tries the most-specific
+wrappers first (`#buybox`, `#desktop_buybox`, `#apex_desktop`, `#rightCol`,
+`#centerCol_feature_div`, `#centerCol`) and accepts the highest-scoring candidate with score ≥ 2.
+Below that threshold it returns the best guess plus a logged warning so the run continues
+but the issue is visible. Returning `None` (no candidate at all) makes the extractor skip
+the HTML/innerText fallbacks entirely rather than risk a false positive — better to report
+"Not Available" than the wrong date.
+
+`BuyBoxScoringTests`, `BuyBoxFinderTests`, and `FalsePositiveScopeTests` in the test suite
+demonstrate this contract: feeding the parser unscoped page text *will* produce wrong
+answers; feeding it only the buy-box subtree produces correct ones.
+
 **Follow-up (BUG-FIX-AMZNOW, 2026-05-30):** On products where Amazon shows both an Amazon Now
 buy-box row AND a Standard buy-box row in the new accordion, the scraper kept reporting the
 Standard "Tomorrow, 31 May" promise instead of the faster "FREE delivery in 10 minutes" one.
@@ -258,7 +327,9 @@ while letting minutes/hours candidates win within the same day.
 
 New pure-Python helper `extract_earliest_delivery_from_text(text, default_channel, now)` lives
 in `scraper.py`. It is Selenium-free so the priority rules are unit-testable. Coverage in
-`tests/test_delivery_parser.py` (42 cases) — run with `python -m unittest tests.test_delivery_parser`.
+`tests/test_delivery_parser.py` (49 cases — parser + channel inference + display + buy-box
+scoring/finder + false-positive scoping) — run with
+`python -m unittest tests.test_delivery_parser`.
 
 ---
 
@@ -627,6 +698,8 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 | **Stale driver reused after CAPTCHA** | Old code did `time.sleep(5*60)` then retried with the same driver, violating "create fresh driver after CAPTCHA pause" | `pause_for_captcha` now polls every 10s with a countdown; callers (`scrape_with_smart_retry` and `run_worker`) recycle the driver after the pause and re-set pincode |
 | **CAPTCHA wait looked like a freeze (especially in GUI)** | Flat 5-min sleep blocked the worker's `msg_queue`, so the GUI progress strip went silent | `pause_for_captcha` takes an optional `msg_queue=` parameter; emits a "M:SS remaining" tick every 10s so the GUI keeps updating |
 | **`detect_captcha` pulled full `page_source` on every scrape** | Full-DOM serialization × 3000 scrapes was a measurable hot-path cost | Replaced with URL + title + `find_elements` selector probes (`#captchacharacters`, `form[action='/errors/validateCaptcha']`); `validate_page_is_product` got the same treatment |
+| **Replaced "collect & sort" with tiered early-return extractor** | Old approach ran 6+ regex passes inside the buy box, built a giant candidate list, deduped, sorted, picked the first. Lots of code surface, hard to reason about, output leaked channel internals (`Amazon Now – X (Free)` / `Standard – X (Free)`). | New tiered flow mirrors Amazon's DOM: Tier 1 = Amazon Now (`[id*='alm-delivery' i], [id*='qcomBuyBox' i], [id*='almOfferDisplay' i]`) — short-circuits if found; Tier 2 = Standard (`[id*='DELIVERY_BLOCK' i], [id*='deliveryBlock' i], [id*='deliveryMessage' i], [id*='promiseMessage' i]`) — earliest of all parsed phrases; Tier 3 = buy-box innerText regex (insurance, logged WARNING); Tier 4 = Not Available. Output format: `Amazon Now – 10 Minutes` / `Tomorrow, 31 May` / `Today` / `Not Available`. Free flag moved to its own column. Result dict carries `"tier"` for log analysis. |
+| **Delivery date matched review / Q&A / description text ("today my package arrived" → wrong date)** | Whole-page `page_source` and `document.body.innerText` fallbacks were scanning the entire DOM, so any "today" / "tomorrow" / weekday word inside reviews, Q&A, description, or recommendation widgets became a delivery candidate and won the `datetime` sort. | New `find_buy_box(driver, logger)` anchors on the right-hand offer panel (price + CTA + quantity + sold-by + delivery, score ≥ 2 out of 6). All DEX / slot / wildcard / container / HTML / innerText reads in `extract_all_delivery_options` now run via `buy_box.find_elements(...)`. Whole-page fallbacks removed. `find_buy_box` returns `None` when no candidate is found — extractor then skips text-blob fallbacks rather than risk a false positive. |
 | **Amazon Now / Quick Commerce promise overlooked on accordion buy-box** | (a) Duration regex matched only "minute"/"hour" so "30 mins"/"2 hrs" dropped silently. (b) Container list missed `#mbc`, `#newAccordionRow_*`, `#qcomBuyBoxRow_feature_div`, `#almOfferDisplay_feature_div` — Amazon's new multi-offer buy box. (c) `wait_for_delivery_block` returned on the first populated channel, so the scraper read the page-source snapshot before Amazon Now hydrated. (d) `_MONTHS` only had 3-letter prefixes so "June 2" failed. (e) "Today" resolved to today-noon (in the past after lunch), wrongly beating same-day "10 minutes" candidates. | (a) Duration regex now allows `mins?`/`hrs?`. (b) Container list extended. (c) Wait now blocks until fast-channel containers populate when present; page-source scan no longer capped at 200 KB; added `document.body.innerText` fallback. (d) Full month names added to `_MONTHS` and `_MONTH_PAT`. (e) "Today" resolves to today-at-20:00. New pure helper `extract_earliest_delivery_from_text` lets the priority rules be unit-tested (`tests/test_delivery_parser.py`, 42 cases). |
 
 ---
@@ -683,3 +756,19 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 - `run_mac.sh` must always start with `cd "$(dirname "$0")"`
 - The shutdown sequence order (Excel must be saved before Chrome quits)
 - The PID lock acquire/release symmetry (must always release, even on crash)
+- **Buy-box anchoring for delivery extraction.** Never reintroduce a
+  whole-page `page_source` or `document.body.innerText` scan for delivery
+  text — it was the root cause of the "today my package arrived" false
+  positive. All delivery reads must go through `find_buy_box(driver, logger)`
+  and use `buy_box.find_elements(...)`. If the buy box can't be found, return
+  "Not Available" — never silently scan the rest of the page.
+- **Tier 1 (Amazon Now) short-circuits Tier 2 (Standard) — do not compare.**
+  When `_extract_amazon_now` returns non-None we trust Amazon's channel and
+  skip Tier 2 entirely. Don't "defensively" parse both and pick the earlier —
+  Amazon Now is always the fastest available for that pincode by definition,
+  and adding the compare path obscures the logic.
+- **Use `[id*='…' i]` substring selectors for Tier 1/2, not exact IDs.**
+  Amazon ships new slot suffixes without notice; substring + case-insensitive
+  matching picks them up automatically. Adding hardcoded IDs is a long-term
+  liability. Add new patterns only if a new family of IDs appears (different
+  prefix entirely), not for each new suffix.

@@ -1306,73 +1306,95 @@ def _normalise_delivery_to_minutes(channel: str, raw_text: str) -> int:
     return max(0, delta)
 
 
-def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
-    """Build a clean Excel-ready delivery string: 'Amazon Now – 10 min (Free)'."""
-    text = raw_text.strip()
-    # BUG-FIX-FASTEST: Strip "Or fastest delivery" / "Fastest delivery" prefix.
+def _clean_delivery_text(raw_text: str) -> str:
+    """Strip Amazon's prefixes/suffixes/noise; return the bare promise text.
+
+    Examples:
+        "FREE delivery in 10 minutes on orders over ₹149" → "10 Minutes"
+        "Or fastest delivery Tomorrow, 31 May. Details"   → "Tomorrow, 31 May"
+        "Get it by Monday, June 3"                        → "Monday, June 3"
+    """
+    text = (raw_text or "").strip()
+    # Leading noise — "Or fastest delivery …", "FREE delivery in …", "Get it by …"
     text = re.sub(r"^(or\s+)?fastest\s+delivery\s+", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(
-        r"^(free\s+delivery\s+in\s+|free\s+delivery\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+)",
+        r"^(free\s+delivery\s+in\s+|free\s+delivery\s+|get\s+it\s+(by\s+)?|delivery\s+by\s+|delivery\s+in\s+|delivery\s+)",
         "", text, flags=re.IGNORECASE,
     ).strip()
+    # Trailing noise — "on orders over ₹149", "Details", countdown, badges
     text = re.sub(r"\s+on orders over.*$", "", text, flags=re.IGNORECASE).strip()
-    # BUG-FIX-FASTEST: Strip trailing noise that bleeds in from the slot's child
-    # elements (Details anchor, countdown span, "on your first order" condition,
-    # "Limited Period Offer" badge).
     text = re.sub(r"\.\s*order within[\s\d\w]+", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"on\s+your\s+first\s+order\.?", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"limited\s+period\s+offer\.?", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\[?details\]?\.?\s*$", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"\s{2,}", " ", text).strip(" .,")
-    text = text.title()
+    return text.title()
+
+
+def _build_delivery_display(channel: str, raw_text: str, is_free: bool) -> str:
+    """Legacy display builder: 'Amazon Now – 10 Minutes (Free)'.
+
+    Kept for backward compatibility with `extract_earliest_delivery_from_text`
+    and the test suite. The live extractor uses `_build_amazon_now_display`
+    and `_build_standard_display` directly (no (Free) suffix, no channel
+    prefix for Standard rows — the user-confirmed format).
+    """
+    text = _clean_delivery_text(raw_text)
     free_label = " (Free)" if is_free else ""
     return f"{channel} – {text}{free_label}"
 
 
-# ── Containers we sweep for delivery text (priority order) ────────────────────
-# Each entry is (id, channel_hint). `channel_hint` is the default channel name
-# used when fragment text doesn't clearly say "minutes/hours" (which would mean
-# Amazon Now). When None, the channel is inferred per-fragment.
-_DELIVERY_CONTAINER_IDS: list = [
-    ("mir-layout-DELIVERY_BLOCK", None),
-    ("almLogoAndDeliveryMessage_feature_div", "Amazon Now"),
-    ("alm-delivery-message", "Amazon Now"),
-    ("almAvailability_feature_div", "Amazon Now"),
-    # BUG-FIX-AMZNOW: new buy-box accordion containers — when Amazon shows
-    # multiple fulfilment offers (Amazon Now + Standard), the Amazon Now row
-    # lives inside one of these and never inside the legacy `#alm-…` IDs.
-    # Without these, the structured sweep missed the "10 minutes" promise
-    # and the page-source fallback was the only chance to catch it.
-    ("qcomBuyBoxRow_feature_div", "Amazon Now"),
-    ("almOfferDisplay_feature_div", "Amazon Now"),
-    ("mbc", None),                   # Multiple Buying Choices wrapper
-    ("newAccordionRow_0", None),     # first accordion row (often Amazon Now)
-    ("newAccordionRow_1", None),     # second accordion row
-    ("newAccordionRow_2", None),
-    ("promiseMessage_feature_div", None),
-    ("buybox-default_feature_div", None),
-    ("deliveryBlockMessage", None),
-    ("deliveryMessageMirWidget", None),
-    ("ddmDeliveryMessage", None),
-    ("freshDeliveryMessage_feature_div", "Amazon Fresh"),
-    ("apex_desktop", None),       # broader buy-box container
-    ("desktop_buybox", None),
-    ("rightCol", None),            # last-resort whole-right-column sweep
-]
+def _build_amazon_now_display(raw_text: str) -> str:
+    """Tier 1 output: 'Amazon Now – 10 Minutes' / 'Amazon Now – 2 Hours'."""
+    text = _clean_delivery_text(raw_text)
+    return f"Amazon Now – {text}" if text else ""
 
-# Slot IDs we read individually so the source tag is precise.
-_DELIVERY_SLOT_SELECTORS: list = [
-    ("primary-large",   "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",   None),
-    ("primary-small",   "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_SMALL",   None),
-    ("secondary-large", "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE", None),
-    ("secondary-small", "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_SMALL", None),
-    ("promise",         "#mir-layout-DELIVERY_BLOCK-slot-PROMISE_HOLDER_DELIVERY_MESSAGE_LARGE", None),
-    ("ub-delivery",     "#mir-layout-DELIVERY_BLOCK-slot-UB_DELIVERY_BLOCK",                None),
-    ("alm-delivery",    "#alm-delivery-message",                                            "Amazon Now"),
-    ("alm-availability","#almAvailability_feature_div .primary-availability-message",      "Amazon Now"),
-    ("fresh-delivery",  "#freshDeliveryMessage_feature_div",                                None),
-    ("ddm-message",     "#ddmDeliveryMessage",                                              None),
-    ("mir-widget",      "#deliveryMessageMirWidget",                                        None),
+
+def _build_standard_display(raw_text: str) -> str:
+    """Tier 2 output: 'Tomorrow, 31 May' / 'Today' / '2 June' (no prefix, no (Free))."""
+    return _clean_delivery_text(raw_text)
+
+
+# ── Pattern-based selectors for the tiered delivery extractor ────────────────
+# SENIOR-FIX-TIERED: Instead of hardcoding every exact slot ID Amazon ships
+# (`…_PRIMARY_DELIVERY_MESSAGE_LARGE`, `…_SECONDARY_…_SMALL`, etc.), we match
+# the *prefix patterns* with CSS substring selectors. The day Amazon ships a
+# `…_TERTIARY_…` slot, we pick it up automatically — no code change. The `i`
+# flag makes the match case-insensitive (Amazon mixes `DELIVERY_BLOCK` upper
+# and `deliveryBlockMessage` camel in different layouts).
+
+# Tier 1 — Amazon Now: ALM, quick-commerce buy-box row, ALM offer display.
+_AMAZON_NOW_SELECTOR = (
+    "[id*='alm-delivery' i],"
+    "[id*='qcomBuyBox' i],"
+    "[id*='almOfferDisplay' i]"
+)
+
+# Tier 2 — Standard delivery: MIR slots (PRIMARY/SECONDARY/PROMISE/…),
+# legacy single-message containers, promise holder.
+_STANDARD_DELIVERY_SELECTOR = (
+    "[id*='DELIVERY_BLOCK' i],"        # MIR layout — any slot suffix
+    "[id*='deliveryBlock' i],"          # legacy #deliveryBlockMessage
+    "[id*='deliveryMessage' i],"        # #ddmDeliveryMessage / #deliveryMessageMirWidget
+    "[id*='promiseMessage' i]"          # #promiseMessage_feature_div
+)
+
+# For HTML-dump forensics when all tiers fail.
+_DEBUG_DUMP_CONTAINERS = [
+    "alm-delivery-message",
+    "qcomBuyBoxRow_feature_div",
+    "almOfferDisplay_feature_div",
+    "mir-layout-DELIVERY_BLOCK",
+    "deliveryBlockMessage",
+    "ddmDeliveryMessage",
+    "deliveryMessageMirWidget",
+    "promiseMessage_feature_div",
+    "freshDeliveryMessage_feature_div",
+    "mbc",
+    "newAccordionRow_0",
+    "newAccordionRow_1",
+    "buybox",
+    "rightCol",
 ]
 
 # Phrase patterns scanned out of free-text. Any match is fed to
@@ -1433,7 +1455,7 @@ def _dump_delivery_html(
         safe_asin = re.sub(r"[^A-Za-z0-9_-]", "_", asin_hint or "noasin")
         out = dump_dir / f"{safe_asin}_{pincode}_{ts}_{reason}.html"
         chunks = [f"<!-- reason={reason} pincode={pincode} ts={ts} -->\n"]
-        for cid, _ in _DELIVERY_CONTAINER_IDS:
+        for cid in _DEBUG_DUMP_CONTAINERS:
             try:
                 el = driver.find_element(By.ID, cid)
                 html = el.get_attribute("outerHTML") or ""
@@ -1600,25 +1622,329 @@ def extract_earliest_delivery_from_text(
     return result
 
 
+# ── Buy-box anchoring ────────────────────────────────────────────────────────
+# SENIOR-FIX-BUYBOX: Delivery extraction MUST be scoped to the buy box (the
+# right-hand offer panel that holds Price / Availability / Quantity / Add to
+# Cart / Buy Now / Delivery / Sold by / Ships from / Payment). Reading delivery
+# text from the whole document picked up the word "today" / "tomorrow" / weekday
+# names from customer reviews ("today my package arrived"), the product
+# description ("Get yours today!"), Q&A ("Will this arrive Monday?"), and
+# "Frequently bought together" widgets — every one a false positive that beat
+# the real promise on `datetime` sort order.
+#
+# Anchor strategy:
+#   1. Try strict buy-box wrapper IDs in order of specificity
+#   2. Validate each candidate by *scoring* the markers it contains
+#      (CTA buttons, price element, quantity, sold-by tabular, delivery block)
+#   3. Pick the highest-scoring candidate; require score >= 2
+#   4. Fall back to #rightCol (broader but always a strict superset of the buy
+#      box on desktop product pages)
+
+# Candidates from most-specific to broadest. `#buybox` is the actual offer
+# panel; `#rightCol` always contains it on desktop product pages.
+_BUY_BOX_CANDIDATE_IDS: list = [
+    "buybox",
+    "desktop_buybox",
+    "apex_desktop",
+    "rightCol",
+    "centerCol_feature_div",
+    "centerCol",
+]
+
+# Buttons that exist *only* in the buy box. Strongest signal we have.
+_BUY_BOX_CTA_SELECTOR = (
+    "#add-to-cart-button, #buy-now-button, "
+    "input[name='submit.add-to-cart'], input[name='submit.buy-now'], "
+    "#one-click-button, #buyNow_feature_div input"
+)
+
+# Price element selectors — these can appear in recommendation widgets too,
+# so on their own they aren't proof of the buy box.
+_BUY_BOX_PRICE_SELECTOR = (
+    "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
+    "#priceblock_ourprice, #priceblock_dealprice, #priceblock_saleprice, "
+    "#price_inside_buybox"
+)
+
+# Buy-box-only structural markers.
+_BUY_BOX_AUX_SELECTORS = [
+    "#quantity, #quantitySelect, [data-action='a-dropdown-button']",
+    "#tabular-buybox, .tabular-buybox-text, #merchant-info, #sellerProfileTriggerId",
+    "[id*='DELIVERY_BLOCK'], #alm-delivery-message, "
+    "#freshDeliveryMessage_feature_div, #qcomBuyBoxRow_feature_div, "
+    "#almOfferDisplay_feature_div, #mbc, [id^='newAccordionRow_']",
+    "#availability, #outOfStock, #exports-desktop-out-of-stock-message",
+]
+
+
+def _score_buy_box_candidate(el) -> int:
+    """Score 0–6 by counting buy-box markers present inside an element.
+
+    Score interpretation:
+      0–1 → almost certainly not the buy box (or empty wrapper)
+      2–3 → likely buy box
+      4+ → definitely buy box
+    """
+    try:
+        score = 0
+        if el.find_elements(By.CSS_SELECTOR, _BUY_BOX_CTA_SELECTOR):
+            score += 2  # CTA buttons are the strongest single signal
+        if el.find_elements(By.CSS_SELECTOR, _BUY_BOX_PRICE_SELECTOR):
+            score += 1
+        for sel in _BUY_BOX_AUX_SELECTORS:
+            if el.find_elements(By.CSS_SELECTOR, sel):
+                score += 1
+        return score
+    except Exception:
+        return 0
+
+
+def find_buy_box(driver: Chrome, logger: logging.Logger):
+    """Locate the buy box. Returns the WebElement or ``None`` if not found.
+
+    SENIOR-FIX-BUYBOX: every delivery extraction call must use this anchor —
+    otherwise we read review/Q&A/description text and produce wrong dates.
+    """
+    best_el = None
+    best_score = 0
+    best_id = None
+    for cid in _BUY_BOX_CANDIDATE_IDS:
+        try:
+            el = driver.find_element(By.ID, cid)
+        except Exception:
+            continue
+        score = _score_buy_box_candidate(el)
+        if score > best_score:
+            best_el = el
+            best_score = score
+            best_id = cid
+
+    if best_score >= 2:
+        logger.debug(
+            f"Buy box anchored on #{best_id} (score={best_score}/6)"
+        )
+        return best_el
+
+    if best_el is not None:
+        logger.warning(
+            f"Buy box best candidate #{best_id} only scored {best_score}/6 — "
+            f"delivery extraction may include off-target text."
+        )
+        return best_el
+
+    logger.warning(
+        "No buy box candidate found on page — delivery extraction will be "
+        "unscoped and may pick up reviews/description text."
+    )
+    return None
+
+
+def _element_text(el) -> str:
+    """Read an element's visible text, normalising whitespace. Returns ''."""
+    try:
+        raw = el.text or el.get_attribute("textContent") or ""
+    except Exception:
+        return ""
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _extract_amazon_now(
+    scope, now: datetime, logger: logging.Logger, asin_hint: str, pincode: str
+) -> Optional[dict]:
+    """Tier 1: Amazon Now / Quick Commerce. Trust Amazon — if any quick-commerce
+    container has parseable text inside the buy box, return it as the earliest.
+
+    Matches IDs containing `alm-delivery`, `qcomBuyBox`, or `almOfferDisplay`
+    (case-insensitive). Also walks up from any `img[alt*='Amazon Now']` to its
+    nearest container so we catch image-anchored variants.
+    """
+    elements: list = []
+    try:
+        elements.extend(scope.find_elements(By.CSS_SELECTOR, _AMAZON_NOW_SELECTOR))
+    except Exception as e:
+        logger.debug(f"[{asin_hint}][{pincode}] Tier 1 ID scan failed: {e}")
+
+    try:
+        for img in scope.find_elements(By.CSS_SELECTOR, "img[alt*='Amazon Now' i]"):
+            try:
+                container = img.find_element(By.XPATH, "./ancestor::div[1]")
+                elements.append(container)
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"[{asin_hint}][{pincode}] Tier 1 image walk failed: {e}")
+
+    for el in elements:
+        text = _element_text(el)
+        if not text:
+            continue
+        dt = _parse_delivery_phrase(text, now)
+        if dt is None:
+            continue
+        display = _build_amazon_now_display(text)
+        if not display:
+            continue
+        is_free_flag = _is_free(text)
+        logger.info(
+            f"[{asin_hint}][{pincode}] EARLIEST (Tier 1 / Amazon Now): "
+            f"{display!r} @ {dt} | raw={text!r}"
+        )
+        return {
+            "earliest_display": display,
+            "is_free": is_free_flag,
+            "all_options": [{
+                "channel": "Amazon Now",
+                "raw_text": text,
+                "display_text": display,
+                "delivery_dt": dt,
+                "is_free": is_free_flag,
+            }],
+        }
+    return None
+
+
+def _extract_standard_delivery(
+    scope, now: datetime, logger: logging.Logger, asin_hint: str, pincode: str
+) -> Optional[dict]:
+    """Tier 2: Standard delivery — MIR slots (PRIMARY/SECONDARY/PROMISE/…) and
+    legacy single-message containers. Read all matches, parse every phrase
+    inside each, return the earliest by datetime.
+
+    PRIMARY is usually FREE+slower; SECONDARY is usually paid+faster
+    ("Or fastest delivery …"). Picking earliest gives the vendor the fastest
+    available option; the price flag is surfaced separately in the Free
+    Delivery column.
+    """
+    try:
+        elements = scope.find_elements(By.CSS_SELECTOR, _STANDARD_DELIVERY_SELECTOR)
+    except Exception as e:
+        logger.debug(f"[{asin_hint}][{pincode}] Tier 2 selector scan failed: {e}")
+        return None
+
+    candidates: list = []
+    seen_texts: set = set()
+    for el in elements:
+        text = _element_text(el)
+        if not text or text in seen_texts:
+            continue
+        seen_texts.add(text)
+        # Each element may contain multiple promises (e.g. #deliveryBlockMessage
+        # wraps both PRIMARY and SECONDARY children) — enumerate every phrase.
+        text_result = extract_earliest_delivery_from_text(text, "Standard", now)
+        for opt in text_result["all_options"]:
+            candidates.append(opt)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: c["delivery_dt"])
+    # Dedup by formatted display so PRIMARY's "Tomorrow, 31 May" and the same
+    # phrase repeated in the parent block don't both occupy a slot.
+    deduped: list = []
+    seen_display: set = set()
+    for c in candidates:
+        display = _build_standard_display(c["raw_text"])
+        key = display.lower()
+        if key in seen_display:
+            continue
+        seen_display.add(key)
+        deduped.append({
+            "channel": "Standard",
+            "raw_text": c["raw_text"],
+            "display_text": display,
+            "delivery_dt": c["delivery_dt"],
+            "is_free": c["is_free"],
+        })
+
+    earliest = deduped[0]
+    logger.info(
+        f"[{asin_hint}][{pincode}] EARLIEST (Tier 2 / Standard): "
+        f"{earliest['display_text']!r} @ {earliest['delivery_dt']} "
+        f"| candidates={len(deduped)}"
+    )
+    return {
+        "earliest_display": earliest["display_text"],
+        "is_free": earliest["is_free"],
+        "all_options": deduped,
+    }
+
+
+def _extract_buybox_fallback(
+    buy_box, now: datetime, logger: logging.Logger, asin_hint: str, pincode: str
+) -> Optional[dict]:
+    """Tier 3: Last-resort regex sweep on the buy box's innerText.
+
+    Only runs when Tiers 1+2 returned nothing — Amazon must have shipped a new
+    container ID we don't recognise. Logged as a WARNING so the failure is
+    visible and the new selector can be added to Tier 1/2 in a follow-up.
+    """
+    try:
+        inner = buy_box.get_attribute("innerText") or buy_box.text or ""
+    except Exception:
+        return None
+    if not inner:
+        return None
+
+    text_result = extract_earliest_delivery_from_text(inner, None, now)
+    if text_result["earliest_dt"] is None:
+        return None
+
+    earliest_opt = text_result["all_options"][0]
+    if earliest_opt["channel"] == "Amazon Now":
+        display = _build_amazon_now_display(earliest_opt["raw_text"])
+    else:
+        display = _build_standard_display(earliest_opt["raw_text"])
+
+    logger.warning(
+        f"[{asin_hint}][{pincode}] EARLIEST (Tier 3 / buy-box fallback): "
+        f"{display!r} @ {earliest_opt['delivery_dt']} — "
+        f"Tiers 1+2 found nothing; consider adding a new selector."
+    )
+    return {
+        "earliest_display": display,
+        "is_free": earliest_opt["is_free"],
+        "all_options": [{
+            "channel": earliest_opt["channel"],
+            "raw_text": earliest_opt["raw_text"],
+            "display_text": display,
+            "delivery_dt": earliest_opt["delivery_dt"],
+            "is_free": earliest_opt["is_free"],
+        }],
+    }
+
+
 def extract_all_delivery_options(
     driver: Chrome,
     expected_pincode: str,
     logger: logging.Logger,
     asin_hint: str = "",
 ) -> dict:
-    """Brute-force extractor: read every delivery-bearing element on the page,
-    parse every date/time phrase, return the earliest.
+    """Tiered, buy-box-scoped delivery extractor.
 
-    Strategy (high → low precision):
-      A. Verify pincode actually applied on the page  (`contextualIngressPtLabel`)
-      B. DEX attributes  (`data-csa-c-delivery-time` / `data-csa-c-delivery-price`)
-      C. Known slot IDs  (PRIMARY / SECONDARY / PROMISE / ALM / Fresh / …)
-      D. Wildcard slot scan  (`[id*="DELIVERY_BLOCK-slot"]`)
-      E. Container innerText sweep  (mir-layout, alm, rightCol, …)
-      F. Page-source regex fallback over the entire HTML
+    The strategy mirrors Amazon's own DOM hierarchy — each tier maps to a
+    distinct fulfilment family. First tier that returns a parseable date wins.
 
-    Every candidate goes through `_parse_delivery_phrase` so they all sort on
-    the same real datetime — no minute-bucket ties, no per-channel priority.
+      A. Verify pincode applied                       (global — header label)
+      B. Wait for delivery widget to populate         (global)
+      C. Locate the buy box                           (anchor; everything below is scoped to it)
+      D. Tier 1 — Amazon Now / Quick Commerce
+            [id*='alm-delivery' i], [id*='qcomBuyBox' i], [id*='almOfferDisplay' i]
+            + img[alt*='Amazon Now']. Trust Amazon — if rendered, it's the fastest.
+      E. Tier 2 — Standard delivery
+            [id*='DELIVERY_BLOCK' i], [id*='deliveryBlock' i],
+            [id*='deliveryMessage' i], [id*='promiseMessage' i].
+            Read all matches, parse every phrase, return earliest by datetime.
+      F. Tier 3 — Buy-box innerText regex sweep (insurance)
+            Runs only if Tiers 1+2 returned nothing. Logged as WARNING so the
+            new container ID can be added to Tier 1/2 in a follow-up.
+      G. Tier 4 — "Not Available"  (dump HTML for forensics)
+
+    Output format (user-confirmed):
+      • Tier 1 hit  → "Amazon Now – 10 Minutes" / "Amazon Now – 2 Hours"
+      • Tier 2/3 hit → "Tomorrow, 31 May" / "Today" / "2 June"  (no channel
+                         prefix, no "(Free)" suffix — price is in a separate
+                         Excel column)
+      • Tier 4      → "Not Available"
 
     Returns:
         {
@@ -1626,6 +1952,8 @@ def extract_all_delivery_options(
             "is_free":          bool,
             "all_options":      list,
             "pincode_verified": bool,
+            "buy_box_found":    bool,
+            "tier":             "amazon_now" | "standard" | "fallback" | "none",
         }
     """
     result: dict = {
@@ -1633,6 +1961,8 @@ def extract_all_delivery_options(
         "is_free": False,
         "all_options": [],
         "pincode_verified": False,
+        "buy_box_found": False,
+        "tier": "none",
     }
     debug_dir = _delivery_debug_dir(logger)
     now = datetime.now()
@@ -1653,8 +1983,7 @@ def extract_all_delivery_options(
         )
         time.sleep(3)
 
-    # ── STEP A2. Wait for delivery widget to render with non-empty content ───
-    # `wait_for_delivery_block` checks innerText length, not just presence.
+    # ── STEP B. Wait for delivery widget to render with non-empty content ────
     delivery_ready = wait_for_delivery_block(driver, timeout=15)
     if not delivery_ready:
         logger.warning(
@@ -1664,194 +1993,44 @@ def extract_all_delivery_options(
         if debug_dir:
             _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "widget_empty")
 
-    def _make_option(channel: str, raw_text: str, is_free: bool) -> Optional[dict]:
-        raw_text = (raw_text or "").strip()
-        if not raw_text:
-            return None
-        dt = _parse_delivery_phrase(raw_text, now)
-        return {
-            "channel": channel,
-            "raw_text": raw_text,
-            "display_text": _build_delivery_display(channel, raw_text, is_free),
-            "delivery_dt": dt,
-            "sort_minutes": max(0, int((dt - now).total_seconds() // 60)) if dt else 999999,
-            "is_free": is_free,
-        }
+    # ── STEP C. Anchor on the buy box ────────────────────────────────────────
+    buy_box = find_buy_box(driver, logger)
+    result["buy_box_found"] = buy_box is not None
+    # When we can't find a buy box, fall back to driver-wide selector reads.
+    # The [id*='…' i] patterns are still safe outside the buy box (they only
+    # match delivery-prefixed IDs), but we skip the Tier 3 innerText sweep
+    # without an anchor — that's the one that risks review/Q&A false positives.
+    scope = buy_box if buy_box is not None else driver
 
-    def _add(opt: Optional[dict], source: str) -> None:
-        if not opt:
-            return
-        # Skip unparseable phrases — they'd sort last and never win, but they
-        # pollute the candidate list and confuse the log.
-        if opt["delivery_dt"] is None:
-            logger.debug(
-                f"[{asin_hint}][{expected_pincode}] [{source}] dropped (unparseable): "
-                f"{opt['raw_text']!r}"
-            )
-            return
-        result["all_options"].append(opt)
-        logger.debug(
-            f"[{asin_hint}][{expected_pincode}] [{source}] {opt['display_text']!r} "
-            f"dt={opt['delivery_dt']} raw={opt['raw_text']!r}"
-        )
+    # ── STEP D. Tier 1 — Amazon Now / Quick Commerce ─────────────────────────
+    tier1 = _extract_amazon_now(scope, now, logger, asin_hint, expected_pincode)
+    if tier1 is not None:
+        result.update(tier1)
+        result["tier"] = "amazon_now"
+        return result
 
-    # ── STEP B. DEX attributes (cleanest data when present) ──────────────────
-    try:
-        for el in driver.find_elements(By.CSS_SELECTOR, "[data-csa-c-delivery-time]"):
-            val = (el.get_attribute("data-csa-c-delivery-time") or "").strip()
-            if not val or not any(c.isalpha() for c in val):
-                continue
-            price_attr = (el.get_attribute("data-csa-c-delivery-price") or "").strip().lower()
-            free = price_attr == "free" or _is_free(val)
-            ch = _infer_channel(val, None)
-            _add(_make_option(ch, val, free), "DEX")
-    except Exception as e:
-        logger.debug(f"DEX scan failed: {e}")
+    # ── STEP E. Tier 2 — Standard delivery (MIR slots + legacy) ──────────────
+    tier2 = _extract_standard_delivery(scope, now, logger, asin_hint, expected_pincode)
+    if tier2 is not None:
+        result.update(tier2)
+        result["tier"] = "standard"
+        return result
 
-    # ── STEP C. Known slot IDs (per-element reads) ───────────────────────────
-    for tag, selector, hint in _DELIVERY_SLOT_SELECTORS:
-        try:
-            for el in driver.find_elements(By.CSS_SELECTOR, selector):
-                text = re.sub(
-                    r"\s+", " ",
-                    (el.text or el.get_attribute("textContent") or ""),
-                ).strip()
-                if not text:
-                    continue
-                ch = _infer_channel(text, hint)
-                _add(_make_option(ch, text, _is_free(text)), f"slot/{tag}")
-        except Exception as e:
-            logger.debug(f"Slot scan ({tag}) failed: {e}")
+    # ── STEP F. Tier 3 — Last-resort buy-box innerText sweep ─────────────────
+    if buy_box is not None:
+        tier3 = _extract_buybox_fallback(buy_box, now, logger, asin_hint, expected_pincode)
+        if tier3 is not None:
+            result.update(tier3)
+            result["tier"] = "fallback"
+            return result
 
-    # ── STEP D. Wildcard slot scan (catches new slot IDs Amazon adds) ────────
-    try:
-        for el in driver.find_elements(By.CSS_SELECTOR, "[id*='DELIVERY_BLOCK-slot']"):
-            slot_id = el.get_attribute("id") or "unknown-slot"
-            text = re.sub(
-                r"\s+", " ",
-                (el.text or el.get_attribute("textContent") or ""),
-            ).strip()
-            if not text:
-                continue
-            ch = _infer_channel(text, None)
-            _add(_make_option(ch, text, _is_free(text)), f"wildcard/{slot_id}")
-    except Exception as e:
-        logger.debug(f"Wildcard slot scan failed: {e}")
-
-    # ── STEP E. Container innerText sweep (whole-block fragmentation) ────────
-    # For each container, split by "Or fastest", bullets, newlines AND by
-    # date-phrase regex. Each fragment is independently parsed.
-    for cid, default_hint in _DELIVERY_CONTAINER_IDS:
-        try:
-            container = driver.find_element(By.ID, cid)
-            block_text = re.sub(
-                r"\s+", " ",
-                (container.text or container.get_attribute("textContent") or ""),
-            ).strip()
-            if not block_text:
-                continue
-            # Coarse split: "Or fastest", bullets, line breaks
-            fragments = re.split(
-                r"\s+Or\s+(?=fastest)|\s*•\s*|\n+",
-                block_text, flags=re.IGNORECASE,
-            )
-            # Plus a regex-based extraction of any date-bearing phrase inside
-            # the block, in case the coarse split missed an option.
-            for m in _DATE_PHRASE_RE.finditer(block_text):
-                fragments.append(m.group(0))
-            for m in _BARE_DURATION_RE.finditer(block_text):
-                fragments.append(m.group(0))
-            for frag in fragments:
-                frag = frag.strip()
-                if len(frag) < 4:
-                    continue
-                # Cheap pre-filter — skip fragments that obviously aren't dates
-                low = frag.lower()
-                if not any(kw in low for kw in (
-                    "today", "tomorrow", "min", "hour", "day",
-                    "jan", "feb", "mar", "apr", "may", "jun",
-                    "jul", "aug", "sep", "oct", "nov", "dec",
-                    "monday", "tuesday", "wednesday", "thursday",
-                    "friday", "saturday", "sunday",
-                )):
-                    continue
-                ch = _infer_channel(frag, default_hint)
-                _add(_make_option(ch, frag, _is_free(frag)), f"container/{cid}")
-        except Exception:
-            continue
-
-    # ── STEP F. Page-source regex fallback over the entire HTML ──────────────
-    # Catches options that live in inline JSON / data attributes the structured
-    # readers miss entirely.
-    # BUG-FIX-AMZNOW: The 200 KB cap used to truncate page_source before the
-    # accordion's second buy-box row on Amazon Now listings — the Amazon Now
-    # promise was inside the rendered HTML but past the cap, so it was never
-    # parsed. Scan the full HTML now; regex is linear and still cheap (<50 ms
-    # on a 1 MB page).
-    try:
-        source = driver.page_source or ""
-        for m in _DATE_PHRASE_RE.finditer(source):
-            raw = re.sub(r"\s+", " ", m.group(0)).strip()
-            ch = _infer_channel(raw, None)
-            _add(_make_option(ch, raw, _is_free(raw)), "page-source/delivery")
-        for m in _BARE_DURATION_RE.finditer(source):
-            raw = re.sub(r"\s+", " ", m.group(0)).strip()
-            # Bare durations in product pages are almost always Amazon Now.
-            _add(_make_option("Amazon Now", raw, _is_free(raw)), "page-source/duration")
-        for m in _BARE_DATE_PHRASE_RE.finditer(source):
-            raw = re.sub(r"\s+", " ", m.group(0)).strip()
-            ch = _infer_channel(raw, None)
-            _add(_make_option(ch, raw, _is_free(raw)), "page-source/bare-date")
-    except Exception as e:
-        logger.debug(f"Page-source fallback failed: {e}")
-
-    # ── STEP F2. Whole-page innerText fallback ───────────────────────────────
-    # BUG-FIX-AMZNOW: when Amazon Now content arrives via an inline React
-    # hydration script (no static HTML), `driver.page_source` misses it but
-    # `document.body.innerText` has it. Run the same parser on the rendered
-    # body text as a last-chance net.
-    try:
-        body_text = driver.execute_script(
-            "return (document.body && document.body.innerText) || '';"
-        ) or ""
-        if body_text:
-            text_result = extract_earliest_delivery_from_text(body_text, None, now)
-            for opt in text_result["all_options"]:
-                _add(_make_option(opt["channel"], opt["raw_text"], opt["is_free"]),
-                     "body-innertext")
-    except Exception as e:
-        logger.debug(f"Body innerText fallback failed: {e}")
-
-    # ── STEP G. Dedup, sort by real datetime, pick earliest ─────────────────
-    if result["all_options"]:
-        seen: set = set()
-        unique = []
-        for opt in result["all_options"]:
-            key = opt["display_text"].strip().lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(opt)
-        unique.sort(key=lambda o: o["delivery_dt"] or datetime.max)
-        result["all_options"] = unique
-
-        earliest = unique[0]
-        result["earliest_display"] = earliest["display_text"]
-        result["is_free"] = earliest["is_free"]
-        logger.info(
-            f"[{asin_hint}][{expected_pincode}] EARLIEST: {earliest['display_text']!r} "
-            f"@ {earliest['delivery_dt']} ({earliest['sort_minutes']} min from now) "
-            f"| candidates={len(unique)}"
-        )
-    else:
-        # Zero candidates — dump HTML so we can post-mortem what Amazon served.
-        logger.warning(
-            f"[{asin_hint}][{expected_pincode}] No delivery options found by any source. "
-            f"Dumping delivery container HTML for forensics."
-        )
-        if debug_dir:
-            _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "zero_candidates")
-
+    # ── STEP G. Tier 4 — Not Available (dump HTML for forensics) ─────────────
+    logger.warning(
+        f"[{asin_hint}][{expected_pincode}] No delivery promise found by any "
+        f"tier. Dumping delivery container HTML for forensics."
+    )
+    if debug_dir:
+        _dump_delivery_html(driver, asin_hint, expected_pincode, debug_dir, "zero_candidates")
     return result
 
 
