@@ -1,8 +1,20 @@
+# Render Blueprint for the AmazonScraper license server.
+#
+# rootDir = license_server so Render reads THIS folder's requirements.txt and
+# runs gunicorn from here. Without rootDir, Render picks up the project-root
+# requirements.txt (the scraper's deps), and gunicorn never gets installed.
+#
+# Free tier note: persistent disks aren't supported on free services. The
+# SQLite DB lives at ./licenses.db on ephemeral storage and is WIPED on every
+# deploy. Fine for testing; before issuing real keys, either:
+#   (a) upgrade plan to "starter" and re-add the `disk:` block below, OR
+#   (b) swap SQLite for Render PostgreSQL (free 1 GB tier).
 services:
   - type: web
     name: amazon-scraper-license
     runtime: python
     plan: free
+    rootDir: license_server
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
     healthCheckPath: /healthz
@@ -11,7 +23,13 @@ services:
         generateValue: true
       - key: LICENSE_ADMIN_TOKEN
         generateValue: true
-      - key: LICENSE_DB_PATH
-        value: /var/data/licenses.db
       - key: PYTHON_VERSION
         value: 3.11.9
+# To re-enable persistence after upgrading to a paid plan, append:
+#     disk:
+#       name: licenses-data
+#       mountPath: /var/data
+#       sizeGB: 1
+# and add an env var:
+#       - key: LICENSE_DB_PATH
+#         value: /var/data/licenses.db
