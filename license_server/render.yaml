@@ -1,14 +1,17 @@
-# Render Blueprint for the AmazonScraper license server.
+# Render Blueprint: license server (Flask) + managed Postgres (free tier).
 #
-# rootDir = license_server so Render reads THIS folder's requirements.txt and
-# runs gunicorn from here. Without rootDir, Render picks up the project-root
-# requirements.txt (the scraper's deps), and gunicorn never gets installed.
+# rootDir points at license_server/ so Render reads THIS folder's
+# requirements.txt and runs gunicorn from here, not the project root.
 #
-# Free tier note: persistent disks aren't supported on free services. The
-# SQLite DB lives at ./licenses.db on ephemeral storage and is WIPED on every
-# deploy. Fine for testing; before issuing real keys, either:
-#   (a) upgrade plan to "starter" and re-add the `disk:` block below, OR
-#   (b) swap SQLite for Render PostgreSQL (free 1 GB tier).
+# Postgres replaces the earlier SQLite-on-ephemeral-/tmp setup. Postgres on
+# Render's free tier is persistent (1 GB included) — keys survive deploys and
+# container restarts. DATABASE_URL is injected automatically via `fromDatabase`.
+databases:
+  - name: amazon-scraper-license-db
+    plan: free
+    databaseName: licenses
+    user: licenses_app
+
 services:
   - type: web
     name: amazon-scraper-license
@@ -25,16 +28,7 @@ services:
         generateValue: true
       - key: PYTHON_VERSION
         value: 3.11.9
-      # /tmp is the only writable path on Render free tier (no persistent disk).
-      # WIPED on every deploy — fine for testing, swap to /var/data when you
-      # upgrade to a paid plan + uncomment the disk block below.
-      - key: LICENSE_DB_PATH
-        value: /tmp/licenses.db
-# To re-enable persistence after upgrading to a paid plan, append:
-#     disk:
-#       name: licenses-data
-#       mountPath: /var/data
-#       sizeGB: 1
-# and add an env var:
-#       - key: LICENSE_DB_PATH
-#         value: /var/data/licenses.db
+      - key: DATABASE_URL
+        fromDatabase:
+          name: amazon-scraper-license-db
+          property: connectionString

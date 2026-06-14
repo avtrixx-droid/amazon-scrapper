@@ -241,3 +241,8 @@ FILE REFERENCE- ---
   output/          Fallback report folder (auto-created)
   progress/        Worker state and Chrome profiles (auto-created)
 
+
+curl -X POST https://amazon-scraper-license.onrender.com/admin/issue \
+  -H "Authorization: Bearer k21+hujWgehGIz6ESYb3O2zgr0okqbdeNgsoI5xfZCY=" \
+  -H "Content-Type: application/json" \
+  -d '{"customer":"Win Test","days":30,"max_machines":1}'

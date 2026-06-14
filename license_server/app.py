@@ -1,8 +1,8 @@
 """
 app.py — License activation + heartbeat server for AmazonScraper.
 
-Flask + SQLite. Designed to run on Render (free tier with a persistent disk).
-Secrets are read from environment variables — never hard-code them here.
+Flask + PostgreSQL. Designed to run on Render with a managed Postgres database
+(free tier). Secrets read from environment variables — never hard-code them.
 
 Endpoints:
   POST /activate        — first-time key activation, binds to machine_id
@@ -21,11 +21,12 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, g, jsonify, request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
@@ -40,13 +41,16 @@ log = logging.getLogger("license_server")
 # ── Config from env ────────────────────────────────────────────────────────────
 SIGNING_SECRET = os.environ.get("LICENSE_SIGNING_SECRET")
 ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN")
-DB_PATH = os.environ.get("LICENSE_DB_PATH", "licenses.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not SIGNING_SECRET:
     log.error("LICENSE_SIGNING_SECRET env var is required.")
     sys.exit(1)
 if not ADMIN_TOKEN:
     log.error("LICENSE_ADMIN_TOKEN env var is required.")
+    sys.exit(1)
+if not DATABASE_URL:
+    log.error("DATABASE_URL env var is required (provided by Render Postgres).")
     sys.exit(1)
 
 # itsdangerous serializer (TimedSerializer so tokens carry an issued-at timestamp)
@@ -59,13 +63,34 @@ app = Flask(__name__)
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
+class PgConn:
+    """Thin wrapper so existing call sites (`db.execute(...).fetchone()`) work.
+
+    psycopg2 connections don't have `.execute()` — only cursors do. This wrapper
+    creates a RealDictCursor per call so rows come back as dicts (matching the
+    sqlite3.Row interface the rest of the file uses).
+    """
+
+    def __init__(self, raw):
+        self._conn = raw
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
 def get_db():
-    """Per-request SQLite connection — stashed on Flask's `g`."""
+    """Per-request Postgres connection — stashed on Flask's `g`."""
     db = getattr(g, "_db", None)
     if db is None:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
+        db = PgConn(psycopg2.connect(DATABASE_URL))
         g._db = db
     return db
 
@@ -79,32 +104,37 @@ def close_db(exc):
 
 def init_db():
     """Create tables on first run. Idempotent."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS keys (
-                key TEXT PRIMARY KEY,
-                customer TEXT NOT NULL,
-                issued_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                max_machines INTEGER NOT NULL DEFAULT 1,
-                revoked INTEGER NOT NULL DEFAULT 0,
-                notes TEXT DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS activations (
-                key TEXT NOT NULL,
-                machine_id TEXT NOT NULL,
-                activated_at TEXT NOT NULL,
-                last_heartbeat TEXT NOT NULL,
-                app_version TEXT DEFAULT '',
-                PRIMARY KEY (key, machine_id),
-                FOREIGN KEY (key) REFERENCES keys(key)
-            );
-            """
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS keys (
+                    key TEXT PRIMARY KEY,
+                    customer TEXT NOT NULL,
+                    issued_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    max_machines INTEGER NOT NULL DEFAULT 1,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT DEFAULT ''
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activations (
+                    key TEXT NOT NULL,
+                    machine_id TEXT NOT NULL,
+                    activated_at TEXT NOT NULL,
+                    last_heartbeat TEXT NOT NULL,
+                    app_version TEXT DEFAULT '',
+                    PRIMARY KEY (key, machine_id),
+                    FOREIGN KEY (key) REFERENCES keys(key)
+                )
+                """
+            )
         conn.commit()
-        log.info("DB initialised at %s", DB_PATH)
+        log.info("DB initialised (Postgres)")
     finally:
         conn.close()
 
@@ -177,7 +207,7 @@ def activate():
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
+    row = db.execute("SELECT * FROM keys WHERE key = %s", (key,)).fetchone()
     if row is None:
         log.info("activate: key_not_found key=%s", key)
         return jsonify({"ok": False, "reason": "key_not_found"}), 404
@@ -192,7 +222,7 @@ def activate():
         return jsonify({"ok": False, "reason": "expired", "expires_at": expires_at}), 403
 
     existing = db.execute(
-        "SELECT * FROM activations WHERE key = ? AND machine_id = ?",
+        "SELECT * FROM activations WHERE key = %s AND machine_id = %s",
         (key, machine_id),
     ).fetchone()
     now = now_iso()
@@ -200,8 +230,8 @@ def activate():
     if existing:
         # Already activated on this machine — refresh the heartbeat row.
         db.execute(
-            "UPDATE activations SET last_heartbeat = ?, app_version = ? "
-            "WHERE key = ? AND machine_id = ?",
+            "UPDATE activations SET last_heartbeat = %s, app_version = %s "
+            "WHERE key = %s AND machine_id = %s",
             (now, app_version, key, machine_id),
         )
         db.commit()
@@ -209,7 +239,7 @@ def activate():
     else:
         # New machine — check slot count.
         count = db.execute(
-            "SELECT COUNT(*) AS c FROM activations WHERE key = ?", (key,)
+            "SELECT COUNT(*) AS c FROM activations WHERE key = %s", (key,)
         ).fetchone()["c"]
         max_machines = row["max_machines"]
         if count >= max_machines:
@@ -225,7 +255,7 @@ def activate():
 
         db.execute(
             "INSERT INTO activations (key, machine_id, activated_at, last_heartbeat, app_version) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s)",
             (key, machine_id, now, now, app_version),
         )
         db.commit()
@@ -258,7 +288,7 @@ def heartbeat():
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
+    row = db.execute("SELECT * FROM keys WHERE key = %s", (key,)).fetchone()
     if row is None or row["revoked"]:
         # Treat unknown key the same as revoked — client should re-activate
         # (or be blocked if revocation was intentional).
@@ -266,7 +296,7 @@ def heartbeat():
         return jsonify({"ok": False, "reason": "revoked"}), 403
 
     activation = db.execute(
-        "SELECT * FROM activations WHERE key = ? AND machine_id = ?",
+        "SELECT * FROM activations WHERE key = %s AND machine_id = %s",
         (key, machine_id),
     ).fetchone()
     if activation is None:
@@ -282,8 +312,8 @@ def heartbeat():
 
     now = now_iso()
     db.execute(
-        "UPDATE activations SET last_heartbeat = ?, app_version = ? "
-        "WHERE key = ? AND machine_id = ?",
+        "UPDATE activations SET last_heartbeat = %s, app_version = %s "
+        "WHERE key = %s AND machine_id = %s",
         (now, app_version, key, machine_id),
     )
     db.commit()
@@ -321,7 +351,7 @@ def admin_issue():
     # Retry until we hit an unused key — collision probability is essentially zero.
     for _ in range(8):
         key = generate_key()
-        row = db.execute("SELECT 1 FROM keys WHERE key = ?", (key,)).fetchone()
+        row = db.execute("SELECT 1 FROM keys WHERE key = %s", (key,)).fetchone()
         if not row:
             break
     else:
@@ -334,7 +364,7 @@ def admin_issue():
 
     db.execute(
         "INSERT INTO keys (key, customer, issued_at, expires_at, max_machines, revoked, notes) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?)",
+        "VALUES (%s, %s, %s, %s, %s, 0, %s)",
         (key, customer, issued_at, expires_at, max_machines, notes),
     )
     db.commit()
@@ -378,14 +408,14 @@ def admin_extend():
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
+    row = db.execute("SELECT * FROM keys WHERE key = %s", (key,)).fetchone()
     if not row:
         return jsonify({"ok": False, "reason": "key_not_found"}), 404
 
     old_expiry = parse_iso(row["expires_at"])
     new_expiry = old_expiry + timedelta(days=days)
     new_expiry_str = new_expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.execute("UPDATE keys SET expires_at = ? WHERE key = ?", (new_expiry_str, key))
+    db.execute("UPDATE keys SET expires_at = %s WHERE key = %s", (new_expiry_str, key))
     db.commit()
     log.info("admin: extended key=%s by %d days → %s", key, days, new_expiry_str)
     return jsonify({"ok": True, "key": key, "expires_at": new_expiry_str})
@@ -400,11 +430,11 @@ def admin_revoke():
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
-    row = db.execute("SELECT 1 FROM keys WHERE key = ?", (key,)).fetchone()
+    row = db.execute("SELECT 1 FROM keys WHERE key = %s", (key,)).fetchone()
     if not row:
         return jsonify({"ok": False, "reason": "key_not_found"}), 404
 
-    db.execute("UPDATE keys SET revoked = 1 WHERE key = ?", (key,))
+    db.execute("UPDATE keys SET revoked = 1 WHERE key = %s", (key,))
     db.commit()
     log.info("admin: revoked key=%s", key)
     return jsonify({"ok": True, "key": key, "revoked": True})
@@ -421,7 +451,7 @@ def admin_release_machine():
 
     db = get_db()
     cur = db.execute(
-        "DELETE FROM activations WHERE key = ? AND machine_id = ?",
+        "DELETE FROM activations WHERE key = %s AND machine_id = %s",
         (key, machine_id),
     )
     db.commit()
@@ -439,13 +469,13 @@ def admin_info():
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
-    row = db.execute("SELECT * FROM keys WHERE key = ?", (key,)).fetchone()
+    row = db.execute("SELECT * FROM keys WHERE key = %s", (key,)).fetchone()
     if not row:
         return jsonify({"ok": False, "reason": "key_not_found"}), 404
 
     activations = db.execute(
         "SELECT machine_id, activated_at, last_heartbeat, app_version "
-        "FROM activations WHERE key = ? ORDER BY activated_at",
+        "FROM activations WHERE key = %s ORDER BY activated_at",
         (key,),
     ).fetchall()
     return jsonify({
@@ -461,5 +491,5 @@ init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    log.info("Starting license server on 0.0.0.0:%d (db=%s)", port, DB_PATH)
+    log.info("Starting license server on 0.0.0.0:%d (Postgres)", port)
     app.run(host="0.0.0.0", port=port)
