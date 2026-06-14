@@ -1742,7 +1742,7 @@ async function submitActivation() {
 
   // Strict shape: AMZ-XXXX-XXXX-XXXX-XXXX  (23 chars, 4 groups of 4)
   if (!/^AMZ-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
-    showError('That key doesn\\'t look right. Format: AMZ-XXXX-XXXX-XXXX-XXXX');
+    showError(`That key doesn't look right. Format: AMZ-XXXX-XXXX-XXXX-XXXX`);
     return;
   }
 
