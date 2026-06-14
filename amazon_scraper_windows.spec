@@ -3,6 +3,12 @@
 #
 # Run with:  pyinstaller amazon_scraper_windows.spec
 # Output:    dist\AmazonScraper\AmazonScraper.exe
+#
+# LICENSE NOTE:
+#   The build environment MUST have `AMZ_LICENSE_SECRET` set before invoking
+#   PyInstaller. license.py reads it at runtime via os.environ.get(...) and
+#   uses it as the itsdangerous verification key for the signed license token.
+#   This value must match `LICENSE_SIGNING_SECRET` on the license server.
 
 import sys
 import os
@@ -142,6 +148,15 @@ a = Analysis(
         "psutil._psutil_linux",
         "psutil._psutil_osx",
         "psutil._common",
+        # ── License client (online activation + offline grace) ──
+        "license",
+        "_build_config",   # written by CI before pyinstaller runs; baked into bundle
+        "winreg",
+        "itsdangerous",
+        "itsdangerous.url_safe",
+        "itsdangerous.serializer",
+        "itsdangerous.signer",
+        "itsdangerous.timed",
         # ── Local modules ──
         "scraper",
         "config",

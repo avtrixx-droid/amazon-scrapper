@@ -29,6 +29,7 @@ Everything must be crash-safe, human-readable in output, and never expose Python
 AmazonScraper/
 ├── scraper.py                    ← core scraper engine — vendor never touches
 ├── gui.py                        ← Flask web UI — entry point for built app
+├── license.py                    ← client license module (activation + heartbeat + grace)
 ├── config.py                     ← vendor ONLY edits this (CLI mode)
 ├── asins.txt                     ← vendor pastes ASINs (one per line, # for comments)
 ├── pincodes.txt                  ← vendor edits pincodes
@@ -45,6 +46,12 @@ AmazonScraper/
 ├── templates/                    ← Flask HTML templates for gui.py
 ├── tests/                        ← unittest suite (Selenium-free parser tests)
 │   └── test_delivery_parser.py   ← 42 tests for the delivery priority resolver
+├── license_server/               ← Render-hosted Flask + SQLite license service
+│   ├── app.py                    ← server: /activate, /heartbeat, /admin/*, /healthz
+│   ├── issue_key.py              ← admin CLI: issue/list/extend/revoke/release-machine
+│   ├── requirements.txt          ← server-side deps (flask, itsdangerous, gunicorn, requests)
+│   ├── render.yaml               ← one-click Render Blueprint
+│   └── README.md                 ← deploy + usage guide
 ├── logs/                         ← auto-created; scraper_YYYYMMDD_HHMMSS.log per run
 ├── output/                       ← timestamped Excel files: AmazonReport_YYYYMMDD_HHMMSS.xlsx
 ├── progress/                     ← progress.json for resume state
@@ -677,6 +684,65 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 
 ---
 
+## License System
+
+Online activation + offline-tolerant heartbeat gate. The desktop app is
+useless until the user enters a valid key on first launch; after that it
+runs offline for up to 14 days at a stretch.
+
+### Flow
+
+1. User installs the app and launches it. `gui.py` calls
+   `license.check_license_status()` before rendering `/`. No license file
+   → redirected to `/activate`.
+2. Activation page posts the key (`AMZ-XXXX-XXXX-XXXX-XXXX`) to
+   `POST /activate` on the Render-hosted server. Server binds the key to
+   `machine_id` (SHA-256 of platform UUID + MAC), returns an
+   itsdangerous-signed token + `expires_at`.
+3. Client writes `license.json` to the user's app-data dir
+   (`%APPDATA%/AmazonScraper/` on Windows, `~/Library/Application Support/...`
+   on macOS, `~/.config/AmazonScraper/` on Linux).
+4. On every launch the client verifies the token *locally* — no network
+   required. If `last_check` is more than 7 days old it sends a
+   `POST /heartbeat`; on revoke/expire the server says so and the client
+   locks the UI. On network failure the client falls into a 14-day grace
+   period (banner shown), after which the user must reconnect.
+
+### Where keys live
+
+- **Server-side database** (`licenses.db`, SQLite): one row per key,
+  one row per (key, machine_id) activation. On Render this lives on the
+  persistent disk at `/var/data/licenses.db`.
+- **Client-side state** (`license.json`): contains the signed token, the
+  expiry timestamp, the customer name, the activated machine_id, and the
+  `last_check` timestamp.
+
+### Issuing keys
+
+```bash
+cd license_server
+python issue_key.py issue --customer "Lapcare" --days 365 --machines 1
+```
+
+Other admin ops: `list`, `extend`, `revoke`, `release-machine`, `info`.
+See `license_server/README.md` for the full guide.
+
+### Secrets
+
+- `LICENSE_SIGNING_SECRET` (server env): used by itsdangerous to sign tokens.
+- `LICENSE_ADMIN_TOKEN` (server env): Bearer auth for `/admin/*` endpoints.
+- `AMZ_LICENSE_SECRET` (client build env): **must equal**
+  `LICENSE_SIGNING_SECRET`. PyInstaller bakes it in via the build environment.
+  If absent, the client raises at first license check.
+
+### Free Render tier caveat
+
+The free Render web service sleeps after 15 min idle. The client's 14-day
+offline grace makes this invisible: a sleeping server just makes the next
+heartbeat take ~30 seconds (we set the request timeout to 35).
+
+---
+
 ## Known Issues & Fixes Applied
 
 | Issue | Root Cause | Fix Applied |
@@ -701,6 +767,7 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 | **Replaced "collect & sort" with tiered early-return extractor** | Old approach ran 6+ regex passes inside the buy box, built a giant candidate list, deduped, sorted, picked the first. Lots of code surface, hard to reason about, output leaked channel internals (`Amazon Now – X (Free)` / `Standard – X (Free)`). | New tiered flow mirrors Amazon's DOM: Tier 1 = Amazon Now (`[id*='alm-delivery' i], [id*='qcomBuyBox' i], [id*='almOfferDisplay' i]`) — short-circuits if found; Tier 2 = Standard (`[id*='DELIVERY_BLOCK' i], [id*='deliveryBlock' i], [id*='deliveryMessage' i], [id*='promiseMessage' i]`) — earliest of all parsed phrases; Tier 3 = buy-box innerText regex (insurance, logged WARNING); Tier 4 = Not Available. Output format: `Amazon Now – 10 Minutes` / `Tomorrow, 31 May` / `Today` / `Not Available`. Free flag moved to its own column. Result dict carries `"tier"` for log analysis. |
 | **Delivery date matched review / Q&A / description text ("today my package arrived" → wrong date)** | Whole-page `page_source` and `document.body.innerText` fallbacks were scanning the entire DOM, so any "today" / "tomorrow" / weekday word inside reviews, Q&A, description, or recommendation widgets became a delivery candidate and won the `datetime` sort. | New `find_buy_box(driver, logger)` anchors on the right-hand offer panel (price + CTA + quantity + sold-by + delivery, score ≥ 2 out of 6). All DEX / slot / wildcard / container / HTML / innerText reads in `extract_all_delivery_options` now run via `buy_box.find_elements(...)`. Whole-page fallbacks removed. `find_buy_box` returns `None` when no candidate is found — extractor then skips text-blob fallbacks rather than risk a false positive. |
 | **Amazon Now / Quick Commerce promise overlooked on accordion buy-box** | (a) Duration regex matched only "minute"/"hour" so "30 mins"/"2 hrs" dropped silently. (b) Container list missed `#mbc`, `#newAccordionRow_*`, `#qcomBuyBoxRow_feature_div`, `#almOfferDisplay_feature_div` — Amazon's new multi-offer buy box. (c) `wait_for_delivery_block` returned on the first populated channel, so the scraper read the page-source snapshot before Amazon Now hydrated. (d) `_MONTHS` only had 3-letter prefixes so "June 2" failed. (e) "Today" resolved to today-noon (in the past after lunch), wrongly beating same-day "10 minutes" candidates. | (a) Duration regex now allows `mins?`/`hrs?`. (b) Container list extended. (c) Wait now blocks until fast-channel containers populate when present; page-source scan no longer capped at 200 KB; added `document.body.innerText` fallback. (d) Full month names added to `_MONTHS` and `_MONTH_PAT`. (e) "Today" resolves to today-at-20:00. New pure helper `extract_earliest_delivery_from_text` lets the priority rules be unit-tested (`tests/test_delivery_parser.py`, 42 cases). |
+| **Anyone with the .exe could use it indefinitely** | No license gate — the build was distributed as a free-running .exe with no activation, no expiry, no kill switch. | Built `license_server/` (Flask + SQLite on Render): `/activate` binds key↔machine_id, `/heartbeat` re-validates weekly, admin CLI in `issue_key.py`. New client module `license.py` stores signed token in user's app-data dir, verifies offline via itsdangerous, 14-day grace if the server is unreachable. `gui.py` gate redirects to `/activate` before any worker spawns; new `/license-status` endpoint exposes status JSON. PyInstaller spec adds `license`, `winreg`, `itsdangerous.*` to `hiddenimports` and requires `AMZ_LICENSE_SECRET` in the build env. |
 
 ---
 
@@ -743,7 +810,10 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 - [ ] Verify `run_mac.sh` on macOS Ventura/Sonoma (right-click → Open With → Terminal)
 - [ ] One-time cleanup script for existing ~35 GB Chrome temp dirs on vendor Mac
 - [ ] Email attachment: gzip Excel if > 10 MB before sending
-- [ ] `--no-headless` flag for vendor to run visible Chrome when debugging CAPTCHAs
+- [x] ~~`--no-headless` flag for vendor to run visible Chrome when debugging CAPTCHAs~~
+- [ ] Replace placeholder `support@yourdomain.com` in the activation page (`ACTIVATE_HTML` in `gui.py`)
+- [ ] Set `LICENSE_SERVER_URL` in `license.py` to the real Render URL after the first deploy
+- [ ] Configure `AMZ_LICENSE_SECRET` in the CI/build environment so PyInstaller bakes it in
 
 ---
 
@@ -772,3 +842,12 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
   matching picks them up automatically. Adding hardcoded IDs is a long-term
   liability. Add new patterns only if a new family of IDs appears (different
   prefix entirely), not for each new suffix.
+- **The license check must run before any worker spawns.** Never move the
+  `_license_ok_for_run()` gate inside `/start` or `/retry` to after the
+  multiprocessing.Process spawn. The whole point is to refuse the run cheaply,
+  not to refuse it after Chrome has already started. Likewise, never call
+  `_get_license_status()` from inside `_poll`, `_worker_entry`, `_handle`,
+  `_build_excel`, or `_retry_failures` — those are downstream of the gate.
+- **Don't move `LICENSE_SERVER_URL` into a config file the vendor can edit.**
+  The vendor must not be able to redirect the activation flow to a fake
+  server. It lives as a constant in `license.py`, baked into the build.

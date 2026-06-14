@@ -27,3 +27,6 @@ __pycache__/
 # Secrets / personal config overrides
 config.local.py
 .env
+
+# License signing secret + server URL — written by CI before PyInstaller, never commit
+_build_config.py
