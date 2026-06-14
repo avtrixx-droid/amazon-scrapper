@@ -735,7 +735,7 @@ def stream():
     )
 
 
-# ── HTML (premium consumer-grade UI; Tailwind CDN + custom design tokens) ─────
+# ── HTML (JPMorgan Chase-themed enterprise UI; custom design tokens) ──────────
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -743,94 +743,125 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Amazon Scraper</title>
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='2' y='2' width='12' height='12' fill='%230066B2'/><rect x='18' y='2' width='12' height='12' fill='%230066B2'/><rect x='2' y='18' width='12' height='12' fill='%230066B2'/><rect x='18' y='18' width='12' height='12' fill='%230066B2'/><rect x='12' y='12' width='8' height='8' fill='%230066B2'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
 <style>
 :root {
-  --bg:#fafaf9; --surface:#fff; --surface-2:#f5f5f4;
-  --border:rgba(0,0,0,0.06); --border-strong:rgba(0,0,0,0.12);
-  --text:#0a0a0b; --text-muted:#71717a; --text-subtle:#a1a1aa;
-  --accent:#4f46e5; --accent-hover:#4338ca; --accent-soft:#eef2ff;
-  --success:#10b981; --danger:#ef4444; --warning:#f59e0b;
-  --radius:12px; --radius-lg:16px;
-  --shadow-sm:0 1px 2px rgba(0,0,0,0.04);
-  --shadow-md:0 4px 12px rgba(0,0,0,0.06);
-  --ease:cubic-bezier(0.4,0,0.2,1);
+  --bg:#f7f7f5;
+  --surface:#ffffff;
+  --surface-2:#f0efec;
+  --border:rgba(0, 0, 0, 0.08);
+  --border-strong:rgba(0, 0, 0, 0.16);
+  --text:#181818;
+  --text-secondary:#555555;
+  --text-tertiary:#8a8a8a;
+  --accent:#0066B2;
+  --accent-hover:#004F8C;
+  --accent-dark:#003594;
+  --accent-soft:#E6F0F8;
+  --success:#008542;
+  --warning:#FF8200;
+  --danger:#D32F2F;
+  --radius:4px;
+  --radius-lg:8px;
+  --shadow-none:0 0 0 transparent;
+  --ease:cubic-bezier(0.4, 0, 0.2, 1);
+  /* Live-log terminal palette (mono surface) */
+  --log-bg:#0a0a0b;
+  --log-fg:#d4d4d8;
+  --log-thumb:#3f3f46;
+  --log-info:#9ec5fe;
+  --log-success:#7ee2a8;
+  --log-warn:#ffc680;
+  --log-error:#f49a9a;
+  --log-muted:#d4d4d8;
 }
 *{box-sizing:border-box}
 html,body{background:var(--bg);color:var(--text);margin:0}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-feature-settings:'cv11','ss01';-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;letter-spacing:-0.011em;font-size:15px;line-height:1.5;min-height:100vh}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;letter-spacing:-0.011em;font-size:14.5px;line-height:1.55;min-height:100vh;display:flex;flex-direction:column}
 h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
 .mono{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace}
 
-.topstrip{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px;position:sticky;top:0;z-index:10}
-.grace-banner{background:rgba(245,158,11,0.08);border-bottom:1px solid rgba(245,158,11,0.25);color:#92400e;font-size:13px}
-.grace-inner{max-width:720px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:10px}
+/* ── Header ─────────────────────────────────────────── */
+.site-header{background:var(--surface);border-bottom:1px solid var(--border);height:64px;display:flex;align-items:center;padding:0 24px}
+.site-header-inner{max-width:960px;width:100%;margin:0 auto;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:24px;height:24px;flex-shrink:0}
+.brand-mark rect{fill:var(--accent)}
+.wordmark{font-size:13px;font-weight:600;letter-spacing:0.06em;color:var(--text);text-transform:uppercase}
+.lic-badge{display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border-strong);padding:6px 12px;border-radius:999px;font-size:12.5px;color:var(--text);font-weight:500;font-variant-numeric:tabular-nums}
+.lic-dot{width:8px;height:8px;border-radius:50%;background:var(--text-tertiary);flex-shrink:0;transition:background 180ms var(--ease)}
+.lic-dot.valid{background:var(--success)}
+.lic-dot.grace{background:var(--warning)}
+.lic-dot.expired,.lic-dot.revoked{background:var(--danger)}
+.lic-dot.required{background:var(--accent)}
+
+.grace-banner{background:rgba(255,130,0,0.08);border-bottom:1px solid rgba(255,130,0,0.25);color:#7a3e00;font-size:13px}
+.grace-inner{max-width:960px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:10px}
 .grace-inner svg{color:var(--warning);flex-shrink:0}
-.grace-x{margin-left:auto;border:none;background:transparent;color:#92400e;cursor:pointer;padding:4px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center}
-.grace-x:hover{background:rgba(245,158,11,0.12)}
-.topstrip-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;justify-content:space-between}
-.wordmark{font-size:17px;font-weight:600;letter-spacing:-0.02em}
-.status-pill{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);font-weight:500}
-.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text-subtle);transition:background 200ms var(--ease)}
-.status-dot.running{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
-.status-dot.complete{background:var(--success)}
-.status-dot.error{background:var(--danger)}
-.status-dot.warn{background:var(--warning)}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(.85)}}
+.grace-x{margin-left:auto;border:none;background:transparent;color:#7a3e00;cursor:pointer;padding:4px;border-radius:var(--radius);display:inline-flex;align-items:center;justify-content:center}
+.grace-x:hover{background:rgba(255,130,0,0.14)}
 
-.page{max-width:720px;margin:0 auto;padding:32px 24px 80px;display:flex;flex-direction:column;gap:20px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px;box-shadow:var(--shadow-sm);opacity:0;transform:translateY(8px);animation:card-in 300ms var(--ease) forwards}
+.status-pill{display:none}
+
+/* ── Page / cards ──────────────────────────────────── */
+.page{flex:1;max-width:960px;width:100%;margin:0 auto;padding:32px 24px 48px;display:flex;flex-direction:column;gap:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px;box-shadow:var(--shadow-none);opacity:0;transform:translateY(4px);animation:card-in 240ms var(--ease) forwards}
 .card:nth-of-type(1){animation-delay:0ms}
-.card:nth-of-type(2){animation-delay:60ms}
-.card:nth-of-type(3){animation-delay:120ms}
+.card:nth-of-type(2){animation-delay:40ms}
+.card:nth-of-type(3){animation-delay:80ms}
 @keyframes card-in{to{opacity:1;transform:translateY(0)}}
-.card-title{font-size:17px;font-weight:600;margin-bottom:6px}
-.card-sub{color:var(--text-muted);font-size:13.5px;margin-bottom:20px}
+.eyebrow{font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-tertiary);margin-bottom:8px}
+.card-title{font-size:17px;font-weight:600;margin-bottom:6px;letter-spacing:-0.02em}
+.card-sub{color:var(--text-secondary);font-size:13.5px;margin-bottom:24px;line-height:1.55}
 
-.seg{position:relative;display:inline-flex;padding:4px;background:var(--surface-2);border-radius:999px;margin-bottom:20px;border:1px solid var(--border)}
-.seg::before{content:'';position:absolute;top:4px;left:4px;width:calc(50% - 4px);height:calc(100% - 8px);background:var(--surface);border-radius:999px;box-shadow:var(--shadow-sm);transition:transform 250ms var(--ease);transform:translateX(0)}
-.seg.is-paste::before{transform:translateX(100%)}
-.seg button{position:relative;z-index:1;border:none;background:transparent;padding:8px 20px;font-size:13.5px;font-weight:500;color:var(--text-muted);cursor:pointer;border-radius:999px;transition:color 200ms var(--ease);font-family:inherit}
-.seg button.active{color:var(--text)}
+/* ── Tab control (replaces sliding pill) ─────────────── */
+.seg{display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid var(--border)}
+.seg button{position:relative;border:none;background:transparent;padding:10px 20px 12px;font-size:13.5px;font-weight:500;color:var(--text-secondary);cursor:pointer;font-family:inherit;transition:color 180ms var(--ease);margin-bottom:-1px}
+.seg button:hover{color:var(--text)}
+.seg button.active{color:var(--accent);font-weight:600}
+.seg button.active::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
 
-.drop{border:1.5px dashed var(--border-strong);border-radius:var(--radius);padding:28px;text-align:center;color:var(--text-muted);transition:all 200ms var(--ease);cursor:pointer;background:var(--surface);position:relative}
-.drop:hover{border-color:var(--text-subtle)}
-.drop.dragover{border-style:solid;border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
-.drop-icon{display:block;margin:0 auto 10px;color:var(--text-subtle)}
-.drop-title{font-size:14px;font-weight:500;color:var(--text)}
-.drop-hint{font-size:12.5px;color:var(--text-subtle);margin-top:4px}
-.drop.loaded{border-style:solid;border-color:var(--success);background:rgba(16,185,129,0.04);text-align:left;cursor:default;padding:16px 20px}
+/* ── Drop zones ────────────────────────────────────── */
+.drop{border:1px dashed var(--border-strong);border-radius:var(--radius);padding:28px;text-align:center;color:var(--text-secondary);transition:all 180ms var(--ease);cursor:pointer;background:var(--surface);position:relative}
+.drop:hover{border-color:var(--accent);background:var(--accent-soft)}
+.drop.dragover{border-style:solid;border-width:2px;padding:27px;border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.drop-icon{display:block;margin:0 auto 10px;color:var(--text-tertiary)}
+.drop-title{font-size:14px;font-weight:600;color:var(--text)}
+.drop-hint{font-size:12.5px;color:var(--text-tertiary);margin-top:4px}
+.drop.loaded{border-style:solid;border-color:var(--success);background:rgba(0,133,66,0.04);text-align:left;cursor:default;padding:16px 20px}
 .drop.loaded .loaded-row{display:flex;align-items:center;gap:12px}
 .drop.loaded .loaded-icon{color:var(--success);flex-shrink:0}
 .drop.loaded .loaded-name{font-size:14px;font-weight:500;color:var(--text)}
-.drop.loaded .loaded-chip{margin-left:auto;font-size:12px;color:var(--text-muted);background:var(--surface-2);padding:4px 10px;border-radius:999px;font-weight:500}
-.drop.loaded .clear-x{margin-left:8px;border:none;background:transparent;color:var(--text-subtle);cursor:pointer;padding:4px;border-radius:6px;transition:all 200ms var(--ease)}
+.drop.loaded .loaded-chip{margin-left:auto;font-size:12px;color:var(--text-secondary);background:var(--surface-2);padding:4px 10px;border-radius:var(--radius);font-weight:500;border:1px solid var(--border)}
+.drop.loaded .clear-x{margin-left:8px;border:none;background:transparent;color:var(--text-tertiary);cursor:pointer;padding:4px;border-radius:var(--radius);transition:all 180ms var(--ease)}
 .drop.loaded .clear-x:hover{color:var(--text);background:var(--surface-2)}
 
-.upload-row + .upload-row{margin-top:14px}
-.upload-label{font-size:12.5px;font-weight:500;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em}
+.upload-row + .upload-row{margin-top:16px}
+.upload-label{font-size:12px;font-weight:600;color:var(--text-tertiary);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em}
 
-.paste-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* ── Paste panel ───────────────────────────────────── */
+.paste-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 @media (max-width:640px){.paste-grid{grid-template-columns:1fr}}
-.paste-block label{display:block;font-size:12.5px;font-weight:500;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em}
-textarea.ta{width:100%;min-height:200px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:12px 14px;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:13px;line-height:1.6;color:var(--text);resize:vertical;transition:border-color 200ms var(--ease),box-shadow 200ms var(--ease)}
-textarea.ta::placeholder{color:var(--text-subtle)}
-textarea.ta:focus{outline:2px solid var(--accent);outline-offset:2px;border-color:transparent}
-.count-chip{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);margin-top:8px;font-weight:500}
+.paste-block label{display:block;font-size:12px;font-weight:600;color:var(--text-tertiary);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em}
+textarea.ta{width:100%;min-height:200px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:12px 14px;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:13px;line-height:1.6;color:var(--text);resize:vertical;transition:border-color 180ms var(--ease)}
+textarea.ta::placeholder{color:var(--text-tertiary)}
+textarea.ta:focus{outline:none;border-color:var(--accent);border-width:2px;padding:11px 13px}
+.count-chip{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);margin-top:8px;font-weight:500}
 .count-chip .ok{color:var(--success)}
 .count-chip .bad{color:var(--danger);cursor:help}
 
-.btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--accent);color:#fff;border:none;padding:14px 28px;border-radius:var(--radius);font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;box-shadow:var(--shadow-sm),inset 0 1px 0 rgba(255,255,255,0.1);transition:all 200ms var(--ease);min-width:180px}
-.btn-primary:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
-.btn-primary:active{transform:translateY(0) scale(0.98)}
-.btn-primary:disabled{background:var(--text-subtle);cursor:not-allowed;transform:none;box-shadow:none}
-.btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface);color:var(--text);border:1px solid var(--border-strong);padding:12px 22px;border-radius:var(--radius);font-weight:500;font-size:14px;font-family:inherit;cursor:pointer;transition:all 200ms var(--ease)}
-.btn-secondary:hover{background:var(--surface-2);border-color:var(--text-subtle)}
+/* ── Buttons ───────────────────────────────────────── */
+.btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--accent);color:#fff;border:none;padding:12px 24px;border-radius:var(--radius);font-weight:600;font-size:14px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease);min-width:160px;letter-spacing:-0.005em}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-primary:active{background:var(--accent-dark)}
+.btn-primary:disabled{background:var(--text-tertiary);cursor:not-allowed}
+.btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface);color:var(--accent);border:1px solid var(--accent);padding:11px 22px;border-radius:var(--radius);font-weight:600;font-size:14px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease)}
+.btn-secondary:hover{background:var(--accent-soft)}
 .btn-danger{background:var(--surface);color:var(--danger);border:1px solid var(--border-strong)}
-.btn-danger:hover{background:rgba(239,68,68,0.04);border-color:var(--danger)}
+.btn-danger:hover{background:rgba(211,47,47,0.05);border-color:var(--danger)}
 @media (max-width:640px){.btn-primary,.btn-secondary{width:100%}}
 button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
@@ -838,73 +869,120 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 
 .actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 
-.progress-card{visibility:hidden;opacity:0;transition:opacity 200ms var(--ease)}
+/* ── Progress card ─────────────────────────────────── */
+.progress-card{visibility:hidden;opacity:0;transition:opacity 180ms var(--ease)}
 .progress-card.show{visibility:visible;opacity:1}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px}
-.stat{text-align:center;padding:12px 8px}
-.stat-num{font-size:32px;font-weight:600;letter-spacing:-0.03em;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin-bottom:28px;border:1px solid var(--border);border-radius:var(--radius)}
+.stat{text-align:center;padding:20px 12px;border-right:1px solid var(--border)}
+.stat:last-child{border-right:none}
+.stat-num{font-size:28px;font-weight:600;letter-spacing:-0.02em;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
 .stat-num.ok{color:var(--success)}
 .stat-num.fail{color:var(--danger)}
-.stat-label{font-size:13px;color:var(--text-muted);margin-top:8px;font-weight:500}
-.progress-meta{display:flex;justify-content:space-between;font-size:12.5px;color:var(--text-muted);margin-bottom:8px;font-variant-numeric:tabular-nums}
-.bar-track{height:8px;background:var(--surface-2);border-radius:999px;overflow:hidden;position:relative}
-.bar-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#818cf8);border-radius:999px;transition:width 400ms var(--ease),background 300ms var(--ease);position:relative;overflow:hidden}
-.bar-fill.shimmer::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.25) 50%,transparent 100%);background-size:200% 100%;animation:shimmer 1.4s linear infinite}
+.stat-label{font-size:11.5px;color:var(--text-tertiary);margin-top:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em}
+.progress-meta{display:flex;justify-content:space-between;font-size:12.5px;color:var(--text-secondary);margin-bottom:8px;font-variant-numeric:tabular-nums}
+.bar-track{height:6px;background:var(--surface-2);border-radius:var(--radius);overflow:hidden;position:relative;border:1px solid var(--border)}
+.bar-fill{height:100%;width:0%;background:var(--accent);transition:width 300ms var(--ease),background 180ms var(--ease)}
 .bar-fill.complete{background:var(--success)}
-@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
-.pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
-.pill{display:inline-flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--border);padding:6px 12px;border-radius:999px;font-size:12.5px;color:var(--text);transition:all 200ms var(--ease)}
-.pill-label{font-weight:600;color:var(--text-muted);font-size:11.5px}
-.pill-msg{color:var(--text-muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pill .dot{width:6px;height:6px;border-radius:50%;background:var(--text-subtle)}
-.pill.active .dot{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
+/* ── Worker cards (replaces pills) ─────────────────── */
+.pills{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:20px}
+.pill{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);padding:10px 12px;border-radius:var(--radius);font-size:12.5px;color:var(--text);transition:border-color 180ms var(--ease)}
+.pill-label{font-weight:600;color:var(--text);font-size:12px;letter-spacing:0.04em}
+.pill-msg{color:var(--text-secondary);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--text-tertiary);flex-shrink:0}
+.pill.active{border-color:var(--accent)}
+.pill.active .dot{background:var(--accent)}
+.pill.ok{border-color:var(--success)}
 .pill.ok .dot{background:var(--success)}
+.pill.fail{border-color:var(--danger)}
 .pill.fail .dot{background:var(--danger)}
+.pill.warn{border-color:var(--warning)}
 .pill.warn .dot{background:var(--warning)}
 
-.log-header{display:flex;align-items:center;justify-content:space-between;margin-top:24px;margin-bottom:10px}
-.log-header h4{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:600}
-.log-clear{border:none;background:transparent;color:var(--text-subtle);font-size:12px;cursor:pointer;padding:4px 8px;border-radius:6px;font-family:inherit;transition:all 200ms var(--ease)}
+.log-header{display:flex;align-items:center;justify-content:space-between;margin-top:28px;margin-bottom:10px}
+.log-header h4{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-tertiary);font-weight:600}
+.log-clear{border:none;background:transparent;color:var(--text-tertiary);font-size:12px;cursor:pointer;padding:4px 8px;border-radius:var(--radius);font-family:inherit;transition:all 180ms var(--ease)}
 .log-clear:hover{color:var(--text);background:var(--surface-2)}
-#log-box{background:#0a0a0b;color:#d4d4d8;border-radius:var(--radius);padding:14px 16px;height:260px;overflow-y:auto;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:11.5px;line-height:1.6}
+#log-box{background:var(--log-bg);color:var(--log-fg);border-radius:var(--radius);padding:14px 16px;height:260px;overflow-y:auto;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:11.5px;line-height:1.6;border:1px solid var(--border)}
 #log-box::-webkit-scrollbar{width:4px}
-#log-box::-webkit-scrollbar-track{background:#0a0a0b}
-#log-box::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:2px}
+#log-box::-webkit-scrollbar-track{background:var(--log-bg)}
+#log-box::-webkit-scrollbar-thumb{background:var(--log-thumb);border-radius:2px}
 #log-box div + div{margin-top:1px}
 
-.summary{display:none;text-align:center;padding:12px 0 24px;animation:summary-in 240ms var(--ease)}
+/* ── Summary ───────────────────────────────────────── */
+.summary{display:none;text-align:center;padding:12px 0 24px;animation:summary-in 180ms var(--ease)}
 .summary.show{display:block}
-@keyframes summary-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
-.summary-icon{width:48px;height:48px;border-radius:50%;background:rgba(16,185,129,0.1);color:var(--success);display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px}
-.summary-title{font-size:18px;font-weight:600;color:var(--text);margin-bottom:6px}
-.summary-sub{font-size:13.5px;color:var(--text-muted);margin-bottom:20px}
+@keyframes summary-in{from{opacity:0}to{opacity:1}}
+.summary-icon{width:40px;height:40px;border-radius:var(--radius);background:var(--accent-soft);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px}
+.summary-title{font-size:18px;font-weight:600;color:var(--text);margin-bottom:6px;letter-spacing:-0.02em}
+.summary-sub{font-size:13.5px;color:var(--text-secondary);margin-bottom:20px}
 
-.retries{display:none;animation:card-in 300ms var(--ease)}
+/* ── Retries card ──────────────────────────────────── */
+.retries{display:none;animation:card-in 240ms var(--ease)}
 .retries.show{display:block}
 .retries-header{display:flex;align-items:center;gap:10px;color:var(--warning);font-weight:600;font-size:15px;margin-bottom:16px}
+.retries-header svg{color:var(--warning);flex-shrink:0}
 .retries-table{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:12.5px}
-.retries-table th{text-align:left;color:var(--text-muted);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;padding:8px 10px;border-bottom:1px solid var(--border)}
+.retries-table th{text-align:left;color:var(--text-tertiary);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:8px 10px;border-bottom:1px solid var(--border)}
 .retries-table td{padding:10px;border-bottom:1px solid var(--border);color:var(--text);vertical-align:top}
-.retries-table td.reason{color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.retries-table td.reason{color:var(--text-secondary);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .retries-table tr:last-child td{border-bottom:none}
-.retries-more{font-size:12px;color:var(--text-muted);margin:0 0 16px}
+.retries-more{font-size:12px;color:var(--text-secondary);margin:0 0 16px}
 
 .fade-out{opacity:.4;pointer-events:none}
+
+/* ── Footer ────────────────────────────────────────── */
+.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:48px 24px;margin-top:auto}
+.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:48px;align-items:flex-start}
+@media (max-width:760px){.site-footer-inner{flex-direction:column;gap:32px}}
+.footer-form{flex:0 0 60%}
+.footer-brand{flex:1;min-width:0}
+.footer-h{font-size:17px;font-weight:600;color:var(--text);letter-spacing:-0.02em;margin-bottom:6px}
+.footer-sub{font-size:13px;color:var(--text-secondary);margin-bottom:20px;line-height:1.55}
+.field-row{display:flex;gap:12px;margin-bottom:12px}
+.field-row > *{flex:1;min-width:0}
+.fld{width:100%;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:13.5px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
+.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
+textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
+.field-row.single{display:block}
+.footer-actions{display:flex;align-items:center;justify-content:flex-end;margin-top:12px;gap:12px}
+.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:12px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
+.contact-confirm.show{display:block}
+.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:12px}
+.contact-error.show{display:block}
+.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.footer-mark{width:20px;height:20px}
+.footer-mark rect{fill:var(--accent)}
+.footer-name{font-size:14px;font-weight:600;color:var(--text);letter-spacing:-0.005em}
+.footer-version{font-size:12px;color:var(--text-tertiary);font-weight:500;margin-left:6px}
+.footer-rule{height:1px;background:var(--border);margin:14px 0}
+.footer-meta{font-size:12.5px;color:var(--text-secondary);line-height:1.7}
+.footer-meta a{color:var(--accent);text-decoration:none}
+.footer-meta a:hover{text-decoration:underline}
+.footer-fine{font-size:11.5px;color:var(--text-tertiary);margin-top:8px}
 </style>
 </head>
 <body>
 
-<!-- ── Top strip ─────────────────────────────────────────────── -->
-<div class="topstrip">
-  <div class="topstrip-inner">
-    <div class="wordmark">Amazon Scraper</div>
-    <div class="status-pill">
-      <span id="status-dot" class="status-dot"></span>
-      <span id="status-label">Ready</span>
+<!-- ── Header ─────────────────────────────────────────────── -->
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="2" y="2" width="12" height="12"/>
+        <rect x="18" y="2" width="12" height="12"/>
+        <rect x="2" y="18" width="12" height="12"/>
+        <rect x="18" y="18" width="12" height="12"/>
+        <rect x="12" y="12" width="8" height="8"/>
+      </svg>
+      <span class="wordmark">Amazon Scraper</span>
+    </div>
+    <div class="lic-badge" id="lic-badge" role="status" aria-live="polite">
+      <span class="lic-dot" id="lic-dot"></span>
+      <span id="lic-text">Checking…</span>
     </div>
   </div>
-</div>
+</header>
 
 {% if license_status and license_status.status == 'grace' %}
 <div class="grace-banner" id="grace-banner">
@@ -927,13 +1005,14 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 
   <!-- ── INPUT CARD ────────────────────────────────────────── -->
   <div class="card" id="input-card">
-    <div class="card-title">Inputs</div>
-    <div class="card-sub">Provide a list of ASINs and the pincodes to test them against.</div>
+    <div class="eyebrow">Step 1 · Input</div>
+    <div class="card-title">Provide ASINs and pincodes</div>
+    <div class="card-sub">Upload .txt files or paste lines directly. Each pincode must be a 6-digit Indian postal code followed by a city name.</div>
 
-    <!-- Segmented control -->
-    <div class="seg" id="mode-seg">
-      <button type="button" class="active" data-mode="upload" onclick="setMode('upload')">Upload</button>
-      <button type="button" data-mode="paste" onclick="setMode('paste')">Paste</button>
+    <!-- Tabbed control -->
+    <div class="seg" id="mode-seg" role="tablist">
+      <button type="button" class="active" data-mode="upload" onclick="setMode('upload')" role="tab">Upload</button>
+      <button type="button" data-mode="paste" onclick="setMode('paste')" role="tab">Paste</button>
     </div>
 
     <!-- Upload panel -->
@@ -943,13 +1022,13 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
         <div class="drop" id="drop-asin" tabindex="0">
           <input type="file" id="asin-file" accept=".txt" hidden onchange="handleFileInput('asin')">
           <div class="drop-default">
-            <svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
               <polyline points="17 8 12 3 7 8"/>
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
-            <div class="drop-title">Drop file or click to browse</div>
-            <div class="drop-hint">ASINs format: B09W9FND7M or B09…,Name,Code</div>
+            <div class="drop-title">Upload file</div>
+            <div class="drop-hint">Drag and drop, or browse to select a .txt file</div>
           </div>
         </div>
       </div>
@@ -958,13 +1037,13 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
         <div class="drop" id="drop-pin" tabindex="0">
           <input type="file" id="pin-file" accept=".txt" hidden onchange="handleFileInput('pin')">
           <div class="drop-default">
-            <svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
               <polyline points="17 8 12 3 7 8"/>
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
-            <div class="drop-title">Drop file or click to browse</div>
-            <div class="drop-hint">Pincodes format: 110001,Delhi — one per line</div>
+            <div class="drop-title">Upload file</div>
+            <div class="drop-hint">Drag and drop, or browse to select a .txt file</div>
           </div>
         </div>
       </div>
@@ -990,7 +1069,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
   <!-- ── ACTION ROW ───────────────────────────────────────── -->
   <div class="actions">
     <button class="btn-primary" id="start-btn" onclick="startScraping()">
-      <span id="start-label">Start scraping</span>
+      <span id="start-label">Run scrape</span>
     </button>
     <button class="btn-secondary btn-danger" id="stop-btn" onclick="stopScraping()" style="display:none">
       Stop
@@ -999,10 +1078,11 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 
   <!-- ── PROGRESS CARD ────────────────────────────────────── -->
   <div class="card progress-card" id="progress-card">
+    <div class="eyebrow">Step 2 · Progress</div>
     <!-- Completion summary (shown only after a run) -->
     <div class="summary" id="summary">
       <div class="summary-icon">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <polyline points="20 6 9 17 4 12"/>
         </svg>
       </div>
@@ -1030,7 +1110,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
       <span id="combo-label">0 / 0 combinations</span>
       <span id="elapsed-label"></span>
     </div>
-    <div class="bar-track"><div class="bar-fill" id="bar-fill"></div></div>
+    <div class="bar-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar-track">
+      <div class="bar-fill" id="bar-fill"></div>
+    </div>
 
     <div class="pills" id="pills"></div>
 
@@ -1043,8 +1125,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 
   <!-- ── RETRIES CARD ─────────────────────────────────────── -->
   <div class="card retries" id="retries-card">
+    <div class="eyebrow">Step 3 · Retries</div>
     <div class="retries-header">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
         <line x1="12" y1="9" x2="12" y2="13"/>
         <line x1="12" y1="17" x2="12.01" y2="17"/>
@@ -1065,6 +1148,49 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 
 </div>
 
+<!-- ── Footer ───────────────────────────────────────────── -->
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <div class="footer-form">
+      <div class="footer-h">Need a key or renewal?</div>
+      <div class="footer-sub">Send a request and we'll get back to you within one business day.</div>
+      <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
+        <div class="field-row">
+          <input class="fld" type="email" id="contact-email" placeholder="Your email" autocomplete="email" required>
+          <input class="fld" type="text" id="contact-subject" value="License key request" required>
+        </div>
+        <div class="field-row single">
+          <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
+        </div>
+        <div class="footer-actions">
+          <button type="submit" class="btn-primary" id="contact-submit">Request key</button>
+        </div>
+        <div class="contact-error" id="contact-error"></div>
+        <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
+      </form>
+    </div>
+    <div class="footer-brand">
+      <div class="footer-brand-row">
+        <svg class="footer-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="12" height="12"/>
+          <rect x="18" y="2" width="12" height="12"/>
+          <rect x="2" y="18" width="12" height="12"/>
+          <rect x="18" y="18" width="12" height="12"/>
+          <rect x="12" y="12" width="8" height="8"/>
+        </svg>
+        <span class="footer-name">Amazon Scraper</span>
+        <span class="footer-version">v2.0</span>
+      </div>
+      <div class="footer-rule"></div>
+      <div class="footer-meta">
+        Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a><br>
+        &copy; 2026 &middot; All rights reserved.
+      </div>
+      <div class="footer-fine">For licensed use only.</div>
+    </div>
+  </div>
+</footer>
+
 <script>
 let mode = 'upload';
 let asinContent = '', pinContent = '';
@@ -1073,12 +1199,22 @@ let pollTimer = null, sseSource = null;
 let isRunning = false;
 let pasteDebounce = {};
 
+let _licenseInvalidTitle = false;
 function setPageTitle(pct) {
+  if (_licenseInvalidTitle) {
+    document.title = '[License invalid] Amazon Scraper';
+    return;
+  }
   document.title = (pct == null) ? 'Amazon Scraper' : '(' + pct + '%) Amazon Scraper';
 }
+// Retained for compatibility with all callers; status now lives in the page
+// title and (when relevant) the worker pill area — the header pill is reserved
+// for license status. No-op for the visual header element to keep JPMC clarity.
 function setHeaderStatus(text, state) {
-  document.getElementById('status-label').textContent = text;
-  document.getElementById('status-dot').className = 'status-dot' + (state ? ' ' + state : '');
+  // Stash the state on the document so other UI affordances can read it if
+  // needed without re-querying the DOM elsewhere.
+  document.body.dataset.runState = state || '';
+  document.body.dataset.runLabel = text || '';
 }
 function setMode(m) {
   mode = m;
@@ -1090,27 +1226,45 @@ function setMode(m) {
 }
 
 // ── ASIN / pincode parsing (matches scraper.parse_*_from_text loosely) ──────
+// Both parsers return invalid entries as {line, n} so the tooltip can read
+// `Invalid: '<line>' line <n>`.
 function parseAsins(text) {
   const valid = [], invalid = [];
-  text.split(/\r?\n/).forEach(raw => {
+  text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim();
     if (!line || line.startsWith('#')) return;
     const asin = line.split(',')[0].trim().toUpperCase();
     if (/^B[0-9A-Z]{9}$/.test(asin)) valid.push(asin);
-    else invalid.push(line);
+    else invalid.push({ line: line, n: idx + 1 });
   });
   return { valid, invalid };
 }
+// Pincode line: 6-digit token (required) + city after a comma (required).
+// "110001,Delhi" valid; "999abc,Foo" invalid; "110001" alone invalid.
 function parsePincodes(text) {
   const valid = [], invalid = [];
-  text.split(/\r?\n/).forEach(raw => {
+  text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim();
     if (!line || line.startsWith('#')) return;
     const parts = line.split(',').map(s => s.trim());
-    if (parts.length >= 2 && /^\d{6}$/.test(parts[0]) && parts[1]) valid.push(parts[0]);
-    else invalid.push(line);
+    const token = parts[0] || '';
+    const city = (parts[1] || '').trim();
+    if (/^\d{6}$/.test(token) && city) valid.push(token);
+    else invalid.push({ line: line, n: idx + 1 });
   });
   return { valid, invalid };
+}
+
+// Strip anything that isn't a digit, comma, or newline from a textarea value
+// so the live pincode field can't accept random punctuation. City names use
+// letters — those are NOT stripped; letters within a city after the comma
+// are kept by the textarea (we only strip control chars that break the
+// 6-digit shape). Actually: digits, letters (for city), space, comma, newline.
+// The 6-digit token rule is enforced by parsePincodes; this strip is the
+// "no garbage like tabs/punctuation" guard.
+function sanitizePincodeText(s) {
+  // Keep digits, ASCII letters, spaces, commas, newlines, carriage returns.
+  return (s || '').replace(/[^0-9A-Za-z,\n\r ]/g, '');
 }
 
 function renderChip(elId, parsed, label) {
@@ -1118,10 +1272,14 @@ function renderChip(elId, parsed, label) {
   if (!el) return;
   const { valid, invalid } = parsed;
   if (!valid.length && !invalid.length) { el.innerHTML = ''; return; }
-  let html = `<span class="ok">${valid.length} valid ${label}${valid.length === 1 ? '' : 's'}</span>`;
+  let html = `<span class="ok">${valid.length} valid &middot; ${invalid.length} invalid</span>`;
   if (invalid.length) {
-    const tip = invalid.slice(0, 8).join('\n') + (invalid.length > 8 ? `\n…and ${invalid.length - 8} more` : '');
-    html += ` · <span class="bad" title="${tip.replace(/"/g, '&quot;')}">${invalid.length} invalid</span>`;
+    const lines = invalid.slice(0, 8).map(x => `Invalid: '${x.line}' line ${x.n}`);
+    if (invalid.length > 8) lines.push(`…and ${invalid.length - 8} more`);
+    const tip = lines.join('\n');
+    html = `<span class="ok">${valid.length} valid</span> &middot; ` +
+           `<span class="bad" title="${tip.replace(/"/g, '&quot;').replace(/&/g, '&amp;').replace(/'/g, '&#39;')}">` +
+           `${invalid.length} invalid</span>`;
   }
   el.innerHTML = html;
 }
@@ -1137,7 +1295,19 @@ function bindPasteCounts() {
     }, 150);
   };
   aT.addEventListener('input', () => upd('asin'));
-  pT.addEventListener('input', () => upd('pin'));
+  pT.addEventListener('input', () => {
+    // Live-strip garbage characters so the 6-digit-token format stays clean.
+    const before = pT.value;
+    const after = sanitizePincodeText(before);
+    if (before !== after) {
+      const pos = pT.selectionStart;
+      pT.value = after;
+      // Best-effort cursor restore — clamp to new length.
+      const newPos = Math.max(0, Math.min(after.length, pos - (before.length - after.length)));
+      try { pT.setSelectionRange(newPos, newPos); } catch (e) {}
+    }
+    upd('pin');
+  });
 }
 
 // ── Drag-and-drop wiring ────────────────────────────────────────────────────
@@ -1372,6 +1542,8 @@ async function pollStatus() {
 
   const pct = d.pct || 0;
   document.getElementById('bar-fill').style.width = pct + '%';
+  const track = document.getElementById('bar-track');
+  if (track) track.setAttribute('aria-valuenow', String(pct));
   document.getElementById('combo-label').textContent  = d.done + ' / ' + d.total + ' combinations';
   document.getElementById('done-num').textContent     = d.done;
   document.getElementById('success-num').textContent  = d.success;
@@ -1531,6 +1703,95 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// ── License badge ─────────────────────────────────────────────────────────────
+let _lastLicenseStatus = null;
+
+function _fmtDate(iso) {
+  if (!iso) return '';
+  // Accept ISO date or "YYYY-MM-DD" or already-formatted strings; reformat as
+  // "12 Jul 2026" if we recognize it.
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  let d;
+  try {
+    d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+  } catch (e) { return String(iso); }
+  return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
+}
+
+function _renderLicenseBadge(status) {
+  const dot = document.getElementById('lic-dot');
+  const txt = document.getElementById('lic-text');
+  if (!dot || !txt || !status) return;
+  dot.className = 'lic-dot';
+  const s = status.status || '';
+  if (s === 'valid') {
+    dot.classList.add('valid');
+    txt.textContent = 'Active · until ' + (_fmtDate(status.expires_at) || '—');
+    _licenseInvalidTitle = false;
+  } else if (s === 'grace') {
+    dot.classList.add('grace');
+    const days = (status.grace_days_left != null) ? status.grace_days_left : status.days_left;
+    txt.textContent = 'Grace · ' + (days != null ? days + ' days left' : 'active');
+    _licenseInvalidTitle = false;
+  } else if (s === 'expired') {
+    dot.classList.add('expired');
+    txt.textContent = 'Expired';
+    _licenseInvalidTitle = true;
+  } else if (s === 'revoked') {
+    dot.classList.add('revoked');
+    txt.textContent = 'Revoked';
+    _licenseInvalidTitle = true;
+  } else {
+    dot.classList.add('required');
+    txt.textContent = 'License required';
+    _licenseInvalidTitle = true;
+  }
+  _lastLicenseStatus = status;
+}
+
+async function refreshLicenseBadge() {
+  try {
+    const r = await fetch('/license-status');
+    const j = await r.json();
+    _renderLicenseBadge(j);
+    // Reflect license-invalid state in the page title so a mid-run revocation
+    // is immediately visible to the user even if the tab is in the background.
+    if (_licenseInvalidTitle) setPageTitle(null);
+  } catch (e) { /* silent */ }
+}
+
+// ── Contact form (mailto) ─────────────────────────────────────────────────────
+function submitContact(ev) {
+  ev.preventDefault();
+  const email   = (document.getElementById('contact-email').value || '').trim();
+  const subject = (document.getElementById('contact-subject').value || 'License key request').trim();
+  const message = (document.getElementById('contact-message').value || '').trim();
+  const errEl = document.getElementById('contact-error');
+  const okEl  = document.getElementById('contact-confirm');
+  errEl.classList.remove('show'); okEl.classList.remove('show');
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    errEl.textContent = 'Please enter a valid email address.';
+    errEl.classList.add('show');
+    return false;
+  }
+  const status = _lastLicenseStatus ? (_lastLicenseStatus.status || 'unknown') : 'unknown';
+  const body =
+    'From: ' + email + '\n\n' +
+    message + '\n\n' +
+    '---\n' +
+    'App version: 2.0\n' +
+    'License status: ' + status;
+  const href = 'mailto:avtrixlab@gmail.com'
+    + '?subject=' + encodeURIComponent(subject)
+    + '&body='    + encodeURIComponent(body);
+  // Open mailto; do not clear the form so the user can retry if mailto fails.
+  window.location.href = href;
+  okEl.classList.add('show');
+  return false;
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   wireDrop('drop-asin', 'asin-file', 'asin');
@@ -1539,6 +1800,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setHeaderStatus('Ready', null);
   // Reflect any in-flight state if the user reloads mid-run.
   pollStatus();
+  refreshLicenseBadge();
+  setInterval(refreshLicenseBadge, 60000);
 });
 </script>
 </body>
@@ -1553,80 +1816,147 @@ ACTIVATE_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Activate · Amazon Scraper</title>
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='2' y='2' width='12' height='12' fill='%230066B2'/><rect x='18' y='2' width='12' height='12' fill='%230066B2'/><rect x='2' y='18' width='12' height='12' fill='%230066B2'/><rect x='18' y='18' width='12' height='12' fill='%230066B2'/><rect x='12' y='12' width='8' height='8' fill='%230066B2'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg:#fafaf9; --surface:#fff; --surface-2:#f5f5f4;
-  --border:rgba(0,0,0,0.06); --border-strong:rgba(0,0,0,0.12);
-  --text:#0a0a0b; --text-muted:#71717a; --text-subtle:#a1a1aa;
-  --accent:#4f46e5; --accent-hover:#4338ca; --accent-soft:#eef2ff;
-  --success:#10b981; --danger:#ef4444; --warning:#f59e0b;
-  --radius:12px; --radius-lg:16px;
-  --shadow-sm:0 1px 2px rgba(0,0,0,0.04);
-  --shadow-md:0 4px 12px rgba(0,0,0,0.06);
-  --ease:cubic-bezier(0.4,0,0.2,1);
+  --bg:#f7f7f5;
+  --surface:#ffffff;
+  --surface-2:#f0efec;
+  --border:rgba(0, 0, 0, 0.08);
+  --border-strong:rgba(0, 0, 0, 0.16);
+  --text:#181818;
+  --text-secondary:#555555;
+  --text-tertiary:#8a8a8a;
+  --accent:#0066B2;
+  --accent-hover:#004F8C;
+  --accent-dark:#003594;
+  --accent-soft:#E6F0F8;
+  --success:#008542;
+  --warning:#FF8200;
+  --danger:#D32F2F;
+  --radius:4px;
+  --radius-lg:8px;
+  --shadow-none:0 0 0 transparent;
+  --ease:cubic-bezier(0.4, 0, 0.2, 1);
 }
 *{box-sizing:border-box}
 html,body{background:var(--bg);color:var(--text);margin:0}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-feature-settings:'cv11','ss01';-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;letter-spacing:-0.011em;font-size:15px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;letter-spacing:-0.011em;font-size:14.5px;line-height:1.55;min-height:100vh;display:flex;flex-direction:column}
 h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
 .mono{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace}
 
-.topstrip{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 24px}
-.topstrip-inner{max-width:720px;margin:0 auto;display:flex;align-items:center;justify-content:space-between}
-.wordmark{font-size:17px;font-weight:600;letter-spacing:-0.02em}
+/* ── Header ─────────────────────────────────────────── */
+.site-header{background:var(--surface);border-bottom:1px solid var(--border);height:64px;display:flex;align-items:center;padding:0 24px}
+.site-header-inner{max-width:960px;width:100%;margin:0 auto;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:24px;height:24px;flex-shrink:0}
+.brand-mark rect{fill:var(--accent)}
+.wordmark{font-size:13px;font-weight:600;letter-spacing:0.06em;color:var(--text);text-transform:uppercase}
+.lic-badge{display:inline-flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border-strong);padding:6px 12px;border-radius:999px;font-size:12.5px;color:var(--text);font-weight:500}
+.lic-dot{width:8px;height:8px;border-radius:50%;background:var(--text-tertiary);flex-shrink:0}
+.lic-dot.valid{background:var(--success)}
+.lic-dot.grace{background:var(--warning)}
+.lic-dot.expired,.lic-dot.revoked{background:var(--danger)}
+.lic-dot.required{background:var(--accent)}
 
+/* ── Page / card ───────────────────────────────────── */
 .page{flex:1;display:flex;align-items:center;justify-content:center;padding:48px 24px}
-.card{width:100%;max-width:480px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:36px;box-shadow:var(--shadow-md);opacity:0;transform:translateY(8px);animation:card-in 300ms var(--ease) forwards}
+.card{width:100%;max-width:480px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:40px;box-shadow:var(--shadow-none);opacity:0;transform:translateY(4px);animation:card-in 240ms var(--ease) forwards}
 @keyframes card-in{to{opacity:1;transform:translateY(0)}}
-.card-title{font-size:24px;font-weight:600;letter-spacing:-0.02em;margin-bottom:8px}
-.card-sub{color:var(--text-muted);font-size:14px;margin-bottom:24px;line-height:1.55}
+.eyebrow{font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-tertiary);margin-bottom:10px}
+.card-title{font-size:28px;font-weight:600;letter-spacing:-0.02em;margin-bottom:10px}
+.card-sub{color:var(--text-secondary);font-size:14.5px;margin-bottom:24px;line-height:1.55;max-width:60ch}
 
-.key-label{display:block;font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
-.key-input{width:100%;background:var(--surface-2);border:1px solid transparent;border-radius:var(--radius);padding:14px;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:16px;letter-spacing:.04em;color:var(--text);text-align:center;transition:all 200ms var(--ease)}
-.key-input::placeholder{color:var(--text-subtle);letter-spacing:.06em}
-.key-input:focus{outline:2px solid var(--accent);outline-offset:2px;background:var(--surface);border-color:transparent}
+.key-label{display:block;font-size:12px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.key-input{width:100%;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:14px;font-family:'JetBrains Mono','SF Mono',Menlo,monospace;font-size:16px;letter-spacing:.04em;color:var(--text);text-align:center;transition:border 180ms var(--ease)}
+.key-input::placeholder{color:var(--text-tertiary);letter-spacing:.06em}
+.key-input:focus{outline:none;border-color:var(--accent);border-width:2px;padding:13px}
+.key-hint{font-size:12px;color:var(--text-tertiary);margin-top:6px}
 
-.btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--accent);color:#fff;border:none;padding:14px 28px;border-radius:var(--radius);font-weight:600;font-size:15px;font-family:inherit;cursor:pointer;box-shadow:var(--shadow-sm),inset 0 1px 0 rgba(255,255,255,0.1);transition:all 200ms var(--ease);margin-top:18px}
-.btn-primary:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
-.btn-primary:active{transform:translateY(0) scale(0.99)}
-.btn-primary:disabled{background:var(--text-subtle);cursor:not-allowed;transform:none;box-shadow:none}
+.btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--accent);color:#fff;border:none;padding:13px 24px;border-radius:var(--radius);font-weight:600;font-size:14.5px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease);margin-top:18px}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-primary:active{background:var(--accent-dark)}
+.btn-primary:disabled{background:var(--text-tertiary);cursor:not-allowed}
 .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-.error-box{display:none;margin-top:14px;padding:12px 14px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.18);border-radius:var(--radius);color:#991b1b;font-size:13.5px;line-height:1.5}
-.error-box.show{display:block;animation:err-in 200ms var(--ease)}
-@keyframes err-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.error-box{display:none;margin-top:14px;padding:12px;background:rgba(211,47,47,0.06);border:1px solid rgba(211,47,47,0.22);border-radius:var(--radius);color:#7a1a1a;font-size:13px;line-height:1.5}
+.error-box.show{display:block}
 
-.status-banner{display:none;margin-bottom:18px;padding:12px 14px;border-radius:var(--radius);font-size:13.5px;line-height:1.5}
+.status-banner{display:none;margin-bottom:18px;padding:12px;border-radius:var(--radius);font-size:13px;line-height:1.55}
 .status-banner.show{display:block}
-.status-banner.expired{background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.18);color:#991b1b}
-.status-banner.revoked{background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.18);color:#991b1b}
+.status-banner.expired,.status-banner.revoked{background:rgba(211,47,47,0.06);border:1px solid rgba(211,47,47,0.22);color:#7a1a1a}
 
-.support-note{text-align:center;margin-top:18px;font-size:12px;color:var(--text-subtle)}
-.support-note a{color:var(--text-muted);text-decoration:none;border-bottom:1px dotted var(--text-subtle)}
-.support-note a:hover{color:var(--text)}
+.request-note{margin-top:16px;font-size:12.5px;color:var(--text-secondary);text-align:center}
+.request-note a{color:var(--accent);text-decoration:none;font-weight:500;cursor:pointer}
+.request-note a:hover{text-decoration:underline}
 
-.success-state{display:none;text-align:center;animation:card-in 240ms var(--ease)}
+.success-state{display:none;text-align:center;animation:scale-in 180ms var(--ease)}
 .success-state.show{display:block}
-.success-icon{width:64px;height:64px;border-radius:50%;background:rgba(16,185,129,0.1);color:var(--success);display:inline-flex;align-items:center;justify-content:center;margin-bottom:18px}
+@keyframes scale-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+.success-icon{width:56px;height:56px;border-radius:var(--radius);background:var(--accent-soft);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;margin-bottom:18px}
 .success-title{font-size:22px;font-weight:600;color:var(--text);margin-bottom:8px;letter-spacing:-0.02em}
-.success-sub{font-size:14px;color:var(--text-muted)}
+.success-sub{font-size:14px;color:var(--text-secondary)}
 .success-sub b{color:var(--text);font-weight:600}
 
-.form-state{transition:opacity 300ms var(--ease)}
+.form-state{transition:opacity 240ms var(--ease)}
 .form-state.fade-out{opacity:0;pointer-events:none}
+
+/* ── Footer ────────────────────────────────────────── */
+.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:48px 24px;margin-top:auto}
+.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:48px;align-items:flex-start}
+@media (max-width:760px){.site-footer-inner{flex-direction:column;gap:32px}}
+.footer-form{flex:0 0 60%}
+.footer-brand{flex:1;min-width:0}
+.footer-h{font-size:17px;font-weight:600;color:var(--text);letter-spacing:-0.02em;margin-bottom:6px}
+.footer-sub{font-size:13px;color:var(--text-secondary);margin-bottom:20px;line-height:1.55}
+.field-row{display:flex;gap:12px;margin-bottom:12px}
+.field-row > *{flex:1;min-width:0}
+.field-row.single{display:block}
+.fld{width:100%;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:13.5px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
+.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
+textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
+.footer-actions{display:flex;align-items:center;justify-content:flex-end;margin-top:12px;gap:12px}
+.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:12px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
+.contact-confirm.show{display:block}
+.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:12px}
+.contact-error.show{display:block}
+.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.footer-mark{width:20px;height:20px}
+.footer-mark rect{fill:var(--accent)}
+.footer-name{font-size:14px;font-weight:600;color:var(--text)}
+.footer-version{font-size:12px;color:var(--text-tertiary);font-weight:500;margin-left:6px}
+.footer-rule{height:1px;background:var(--border);margin:14px 0}
+.footer-meta{font-size:12.5px;color:var(--text-secondary);line-height:1.7}
+.footer-meta a{color:var(--accent);text-decoration:none}
+.footer-meta a:hover{text-decoration:underline}
+.footer-fine{font-size:11.5px;color:var(--text-tertiary);margin-top:8px}
 </style>
 </head>
 <body>
 
-<div class="topstrip">
-  <div class="topstrip-inner">
-    <div class="wordmark">Amazon Scraper</div>
+<!-- ── Header ─────────────────────────────────────────────── -->
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="2" y="2" width="12" height="12"/>
+        <rect x="18" y="2" width="12" height="12"/>
+        <rect x="2" y="18" width="12" height="12"/>
+        <rect x="18" y="18" width="12" height="12"/>
+        <rect x="12" y="12" width="8" height="8"/>
+      </svg>
+      <span class="wordmark">Amazon Scraper</span>
+    </div>
+    <div class="lic-badge" id="lic-badge" role="status" aria-live="polite">
+      <span class="lic-dot required" id="lic-dot"></span>
+      <span id="lic-text">License required</span>
+    </div>
   </div>
-</div>
+</header>
 
 <div class="page">
   <div class="card">
@@ -1637,18 +1967,19 @@ h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
       <div class="status-banner expired show">
         Your license has expired{% if license_status.expires_at %} on
         <span class="mono">{{ license_status.expires_at }}</span>{% endif %}.
-        Enter a renewed key below, or contact support to renew.
+        Enter a renewed key below, or request a new one using the form at the bottom of this page.
       </div>
       {% elif license_status and license_status.status == 'revoked' %}
       <div class="status-banner revoked show">
-        This installation's license has been revoked. Contact support if you
-        believe this is a mistake, or enter a new key below.
+        This installation's license has been revoked. Request a new key using the form at the bottom of this page,
+        or enter a replacement below.
       </div>
       {% endif %}
 
+      <div class="eyebrow">License activation</div>
       <h1 class="card-title">Activate your license</h1>
       <p class="card-sub">
-        Enter the key you received at purchase to start using Amazon Scraper.
+        Enter the key you received at purchase. Your license is tied to this machine — keep it confidential.
       </p>
 
       <label class="key-label" for="key-input">License key</label>
@@ -1662,23 +1993,23 @@ h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
         placeholder="AMZ-XXXX-XXXX-XXXX-XXXX"
         maxlength="23"
       >
+      <div class="key-hint">Format: AMZ-XXXX-XXXX-XXXX-XXXX</div>
 
       <button class="btn-primary" id="activate-btn" onclick="submitActivation()">
-        <span id="activate-label">Activate</span>
+        <span id="activate-label">Activate license</span>
       </button>
 
       <div class="error-box" id="error-box"></div>
 
-      <p class="support-note">
-        Having trouble?
-        <a href="mailto:support@yourdomain.com">support@yourdomain.com</a>
-        <!-- NOTE: replace placeholder support email before release -->
+      <p class="request-note">
+        Don't have a key?
+        <a onclick="scrollToContact(event)">Use the form at the bottom of the page to request one.</a>
       </p>
     </div>
 
     <div class="success-state" id="success-state">
       <div class="success-icon">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <polyline points="20 6 9 17 4 12"/>
         </svg>
       </div>
@@ -1689,8 +2020,52 @@ h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
   </div>
 </div>
 
+<!-- ── Footer ───────────────────────────────────────────── -->
+<footer class="site-footer" id="site-footer">
+  <div class="site-footer-inner">
+    <div class="footer-form">
+      <div class="footer-h">Need a key or renewal?</div>
+      <div class="footer-sub">Send a request and we'll get back to you within one business day.</div>
+      <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
+        <div class="field-row">
+          <input class="fld" type="email" id="contact-email" placeholder="Your email" autocomplete="email" required>
+          <input class="fld" type="text" id="contact-subject" value="License key request" required>
+        </div>
+        <div class="field-row single">
+          <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
+        </div>
+        <div class="footer-actions">
+          <button type="submit" class="btn-primary" id="contact-submit" style="width:auto;min-width:160px;margin-top:0">Request key</button>
+        </div>
+        <div class="contact-error" id="contact-error"></div>
+        <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
+      </form>
+    </div>
+    <div class="footer-brand">
+      <div class="footer-brand-row">
+        <svg class="footer-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="12" height="12"/>
+          <rect x="18" y="2" width="12" height="12"/>
+          <rect x="2" y="18" width="12" height="12"/>
+          <rect x="18" y="18" width="12" height="12"/>
+          <rect x="12" y="12" width="8" height="8"/>
+        </svg>
+        <span class="footer-name">Amazon Scraper</span>
+        <span class="footer-version">v2.0</span>
+      </div>
+      <div class="footer-rule"></div>
+      <div class="footer-meta">
+        Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a><br>
+        &copy; 2026 &middot; All rights reserved.
+      </div>
+      <div class="footer-fine">For licensed use only.</div>
+    </div>
+  </div>
+</footer>
+
 <script>
 const KEY_RE = /[^A-Z0-9]/g;
+let _lastLicenseStatus = {status: 'needs_activation'};
 
 function formatKey(raw) {
   const cleaned = raw.toUpperCase().replace(KEY_RE, '');
@@ -1703,6 +2078,50 @@ function formatKey(raw) {
   }
   if (groups.length === 0 && !cleaned) return '';
   return 'AMZ' + (groups.length ? '-' + groups.join('-') : '');
+}
+
+function _fmtDate(iso) {
+  if (!iso) return '';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
+  } catch (e) { return String(iso); }
+}
+
+function _renderLicenseBadge(status) {
+  const dot = document.getElementById('lic-dot');
+  const txt = document.getElementById('lic-text');
+  if (!dot || !txt || !status) return;
+  dot.className = 'lic-dot';
+  const s = status.status || '';
+  if (s === 'valid') {
+    dot.classList.add('valid');
+    txt.textContent = 'Active · until ' + (_fmtDate(status.expires_at) || '—');
+  } else if (s === 'grace') {
+    dot.classList.add('grace');
+    const days = (status.grace_days_left != null) ? status.grace_days_left : status.days_left;
+    txt.textContent = 'Grace · ' + (days != null ? days + ' days left' : 'active');
+  } else if (s === 'expired') {
+    dot.classList.add('expired');
+    txt.textContent = 'Expired';
+  } else if (s === 'revoked') {
+    dot.classList.add('revoked');
+    txt.textContent = 'Revoked';
+  } else {
+    dot.classList.add('required');
+    txt.textContent = 'License required';
+  }
+  _lastLicenseStatus = status;
+}
+
+async function refreshLicenseBadge() {
+  try {
+    const r = await fetch('/license-status');
+    const j = await r.json();
+    _renderLicenseBadge(j);
+  } catch (e) { /* silent */ }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1723,6 +2142,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   input.focus();
+  refreshLicenseBadge();
+  setInterval(refreshLicenseBadge, 60000);
 });
 
 function showError(msg) {
@@ -1733,6 +2154,16 @@ function showError(msg) {
 
 function clearError() {
   document.getElementById('error-box').classList.remove('show');
+}
+
+function scrollToContact(ev) {
+  if (ev) ev.preventDefault();
+  const target = document.getElementById('site-footer');
+  if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
+  setTimeout(() => {
+    const em = document.getElementById('contact-email');
+    if (em) em.focus();
+  }, 400);
 }
 
 async function submitActivation() {
@@ -1761,35 +2192,65 @@ async function submitActivation() {
     data = await res.json();
   } catch (err) {
     btn.disabled = false;
-    label.textContent = 'Activate';
+    label.textContent = 'Activate license';
     showError('Network error: ' + err);
     return;
   }
 
   if (!data.ok) {
     btn.disabled = false;
-    label.textContent = 'Activate';
+    label.textContent = 'Activate license';
     showError(data.error || 'Activation failed. Please try again.');
     return;
   }
 
-  // Success — fade form, show check, redirect.
+  // Success — restrained scale-in, no theatrics.
   document.getElementById('form-state').classList.add('fade-out');
   const sub = document.getElementById('success-sub');
   const exp = data.expires_at || '';
   const cust = data.customer || '';
   if (exp && cust) {
-    sub.innerHTML = `Expires <b>${exp}</b><br>Licensed to <b>${cust}</b>`;
+    sub.innerHTML = `Expires <b>${_fmtDate(exp)}</b><br>Licensed to <b>${cust}</b>`;
   } else if (exp) {
-    sub.innerHTML = `Expires <b>${exp}</b>`;
+    sub.innerHTML = `Expires <b>${_fmtDate(exp)}</b>`;
   } else {
     sub.textContent = 'Redirecting…';
   }
   setTimeout(() => {
     document.getElementById('form-state').style.display = 'none';
     document.getElementById('success-state').classList.add('show');
-  }, 280);
+  }, 240);
   setTimeout(() => { window.location.href = '/'; }, 1500);
+}
+
+// ── Contact form (mailto) ─────────────────────────────────────────────────────
+function submitContact(ev) {
+  ev.preventDefault();
+  const email   = (document.getElementById('contact-email').value || '').trim();
+  const subject = (document.getElementById('contact-subject').value || 'License key request').trim();
+  const message = (document.getElementById('contact-message').value || '').trim();
+  const errEl = document.getElementById('contact-error');
+  const okEl  = document.getElementById('contact-confirm');
+  errEl.classList.remove('show'); okEl.classList.remove('show');
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    errEl.textContent = 'Please enter a valid email address.';
+    errEl.classList.add('show');
+    return false;
+  }
+  const status = _lastLicenseStatus ? (_lastLicenseStatus.status || 'unknown') : 'unknown';
+  const body =
+    'From: ' + email + '\n\n' +
+    message + '\n\n' +
+    '---\n' +
+    'App version: 2.0\n' +
+    'License status: ' + status;
+  const href = 'mailto:avtrixlab@gmail.com'
+    + '?subject=' + encodeURIComponent(subject)
+    + '&body='    + encodeURIComponent(body);
+  window.location.href = href;
+  okEl.classList.add('show');
+  return false;
 }
 </script>
 </body>
