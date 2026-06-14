@@ -15,7 +15,3 @@ services:
         value: /var/data/licenses.db
       - key: PYTHON_VERSION
         value: 3.11.9
-    disk:
-      name: licenses-data
-      mountPath: /var/data
-      sizeGB: 1
