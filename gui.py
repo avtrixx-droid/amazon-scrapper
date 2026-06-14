@@ -857,14 +857,14 @@ textarea.ta:focus{outline:none;border-color:var(--accent);border-width:2px;paddi
 .btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--accent);color:#fff;border:none;padding:12px 24px;border-radius:var(--radius);font-weight:600;font-size:14px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease);min-width:160px;letter-spacing:-0.005em}
 .btn-primary:hover{background:var(--accent-hover)}
 .btn-primary:active{background:var(--accent-dark)}
-.btn-primary:disabled{background:var(--text-tertiary);cursor:not-allowed}
+.btn-primary:disabled{background:var(--accent);opacity:.6;cursor:not-allowed}
 .btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface);color:var(--accent);border:1px solid var(--accent);padding:11px 22px;border-radius:var(--radius);font-weight:600;font-size:14px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease)}
 .btn-secondary:hover{background:var(--accent-soft)}
 .btn-danger{background:var(--surface);color:var(--danger);border:1px solid var(--border-strong)}
 .btn-danger:hover{background:rgba(211,47,47,0.05);border-color:var(--danger)}
 @media (max-width:640px){.btn-primary,.btn-secondary{width:100%}}
 button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.45);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 .actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -932,34 +932,41 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 .fade-out{opacity:.4;pointer-events:none}
 
 /* ── Footer ────────────────────────────────────────── */
-.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:48px 24px;margin-top:auto}
-.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:48px;align-items:flex-start}
-@media (max-width:760px){.site-footer-inner{flex-direction:column;gap:32px}}
-.footer-form{flex:0 0 60%}
-.footer-brand{flex:1;min-width:0}
-.footer-h{font-size:17px;font-weight:600;color:var(--text);letter-spacing:-0.02em;margin-bottom:6px}
-.footer-sub{font-size:13px;color:var(--text-secondary);margin-bottom:20px;line-height:1.55}
-.field-row{display:flex;gap:12px;margin-bottom:12px}
-.field-row > *{flex:1;min-width:0}
-.fld{width:100%;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:13.5px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
-.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
-textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
-.field-row.single{display:block}
-.footer-actions{display:flex;align-items:center;justify-content:flex-end;margin-top:12px;gap:12px}
-.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:12px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
-.contact-confirm.show{display:block}
-.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:12px}
-.contact-error.show{display:block}
-.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:28px 24px;margin-top:auto}
+.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:32px;align-items:center;justify-content:space-between}
+@media (max-width:640px){.site-footer-inner{flex-direction:column;gap:20px;align-items:flex-start}}
+.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .footer-mark{width:20px;height:20px}
 .footer-mark rect{fill:var(--accent)}
 .footer-name{font-size:14px;font-weight:600;color:var(--text);letter-spacing:-0.005em}
 .footer-version{font-size:12px;color:var(--text-tertiary);font-weight:500;margin-left:6px}
-.footer-rule{height:1px;background:var(--border);margin:14px 0}
 .footer-meta{font-size:12.5px;color:var(--text-secondary);line-height:1.7}
 .footer-meta a{color:var(--accent);text-decoration:none}
 .footer-meta a:hover{text-decoration:underline}
-.footer-fine{font-size:11.5px;color:var(--text-tertiary);margin-top:8px}
+.footer-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+@media (max-width:640px){.footer-right{align-items:flex-start}}
+.footer-contact{font-size:12px;color:var(--text-tertiary)}
+.footer-contact a{color:var(--accent);text-decoration:none}
+
+/* ── Modal (key request) ─────────────────────────── */
+.modal-overlay{position:fixed;inset:0;background:rgba(24,24,24,0.45);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px}
+.modal-overlay.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);max-width:460px;width:100%;padding:32px;position:relative;animation:modal-in 180ms var(--ease)}
+@keyframes modal-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.modal-close{position:absolute;top:14px;right:14px;border:none;background:transparent;cursor:pointer;color:var(--text-tertiary);padding:6px;display:inline-flex;border-radius:var(--radius);line-height:0}
+.modal-close:hover{color:var(--text);background:var(--surface-2)}
+.modal-eyebrow{font-size:11.5px;font-weight:600;letter-spacing:0.08em;color:var(--text-tertiary);text-transform:uppercase;margin-bottom:8px}
+.modal-title{font-size:21px;font-weight:600;letter-spacing:-0.02em;color:var(--text);margin:0 0 6px}
+.modal-sub{font-size:13.5px;color:var(--text-secondary);line-height:1.55;margin:0 0 18px}
+.modal-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin:14px 0 6px}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
+.fld{width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:14px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
+.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
+textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
+.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:14px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
+.contact-confirm.show{display:block}
+.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:14px;padding:10px 12px;background:rgba(211,47,47,0.06);border:1px solid rgba(211,47,47,0.2);border-radius:var(--radius)}
+.contact-error.show{display:block}
 </style>
 </head>
 <body>
@@ -1007,7 +1014,7 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
   <div class="card" id="input-card">
     <div class="eyebrow">Step 1 · Input</div>
     <div class="card-title">Provide ASINs and pincodes</div>
-    <div class="card-sub">Upload .txt files or paste lines directly. Each pincode must be a 6-digit Indian postal code followed by a city name.</div>
+    <div class="card-sub">Upload .txt files or paste lines directly. Each pincode is a 6-digit Indian postal code — one per line. A city name after a comma is optional.</div>
 
     <!-- Tabbed control -->
     <div class="seg" id="mode-seg" role="tablist">
@@ -1059,7 +1066,7 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
         </div>
         <div class="paste-block">
           <label>Pincodes</label>
-          <textarea class="ta" id="pin-text" placeholder="110001,Delhi&#10;400001,Mumbai"></textarea>
+          <textarea class="ta" id="pin-text" placeholder="110001&#10;400001&#10;560001,Bengaluru"></textarea>
           <div class="count-chip" id="pin-count"></div>
         </div>
       </div>
@@ -1151,25 +1158,7 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
 <!-- ── Footer ───────────────────────────────────────────── -->
 <footer class="site-footer">
   <div class="site-footer-inner">
-    <div class="footer-form">
-      <div class="footer-h">Need a key or renewal?</div>
-      <div class="footer-sub">Send a request and we'll get back to you within one business day.</div>
-      <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
-        <div class="field-row">
-          <input class="fld" type="email" id="contact-email" placeholder="Your email" autocomplete="email" required>
-          <input class="fld" type="text" id="contact-subject" value="License key request" required>
-        </div>
-        <div class="field-row single">
-          <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
-        </div>
-        <div class="footer-actions">
-          <button type="submit" class="btn-primary" id="contact-submit">Request key</button>
-        </div>
-        <div class="contact-error" id="contact-error"></div>
-        <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
-      </form>
-    </div>
-    <div class="footer-brand">
+    <div class="footer-left">
       <div class="footer-brand-row">
         <svg class="footer-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <rect x="2" y="2" width="12" height="12"/>
@@ -1181,15 +1170,40 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
         <span class="footer-name">Amazon Scraper</span>
         <span class="footer-version">v2.0</span>
       </div>
-      <div class="footer-rule"></div>
-      <div class="footer-meta">
-        Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a><br>
-        &copy; 2026 &middot; All rights reserved.
-      </div>
-      <div class="footer-fine">For licensed use only.</div>
+      <div class="footer-meta">For licensed use only &middot; &copy; 2026</div>
+    </div>
+    <div class="footer-right">
+      <button type="button" class="btn-secondary" onclick="openKeyModal()">Need a key or renewal?</button>
+      <div class="footer-contact">Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a></div>
     </div>
   </div>
 </footer>
+
+<!-- ── Key-request modal ─────────────────────────────────────── -->
+<div class="modal-overlay" id="key-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="km-title">
+    <button class="modal-close" type="button" onclick="closeKeyModal()" aria-label="Close">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div class="modal-eyebrow">Support request</div>
+    <h2 class="modal-title" id="km-title">Need a key or renewal?</h2>
+    <p class="modal-sub">Send a request and we'll get back to you within one business day.</p>
+    <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
+      <label class="modal-label" for="contact-email">Your email</label>
+      <input class="fld" type="email" id="contact-email" placeholder="you@example.com" autocomplete="email" required>
+      <label class="modal-label" for="contact-subject">Subject</label>
+      <input class="fld" type="text" id="contact-subject" value="License key request" required>
+      <label class="modal-label" for="contact-message">Message</label>
+      <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
+      <div class="contact-error" id="contact-error"></div>
+      <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="closeKeyModal()">Cancel</button>
+        <button type="submit" class="btn-primary" id="contact-submit">Send request</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <script>
 let mode = 'upload';
@@ -1239,17 +1253,15 @@ function parseAsins(text) {
   });
   return { valid, invalid };
 }
-// Pincode line: 6-digit token (required) + city after a comma (required).
-// "110001,Delhi" valid; "999abc,Foo" invalid; "110001" alone invalid.
+// Pincode line: a 6-digit token is all that's required. An optional city may
+// follow a comma ("110001" valid; "110001,Delhi" valid; "999abc" invalid).
 function parsePincodes(text) {
   const valid = [], invalid = [];
   text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim();
     if (!line || line.startsWith('#')) return;
-    const parts = line.split(',').map(s => s.trim());
-    const token = parts[0] || '';
-    const city = (parts[1] || '').trim();
-    if (/^\d{6}$/.test(token) && city) valid.push(token);
+    const token = (line.split(',')[0] || '').trim();
+    if (/^\d{6}$/.test(token)) valid.push(token);
     else invalid.push({ line: line, n: idx + 1 });
   });
   return { valid, invalid };
@@ -1466,7 +1478,7 @@ function setStartLoading(loading) {
   if (loading) {
     label.innerHTML = '<span class="spinner"></span>';
   } else {
-    label.textContent = 'Start scraping';
+    label.textContent = 'Run scrape';
   }
 }
 
@@ -1564,6 +1576,7 @@ async function pollStatus() {
   if (!d.running && d.status !== 'Running…' && d.status !== 'Building Excel…' && d.status !== 'Retrying failures…') {
     stopPolling();
     isRunning = false;
+    setStartLoading(false);   // re-enable + restore the "Run scrape" label
     document.getElementById('start-btn').style.display = '';
     document.getElementById('stop-btn').style.display  = 'none';
     document.getElementById('input-card').classList.remove('fade-out');
@@ -1761,6 +1774,30 @@ async function refreshLicenseBadge() {
   } catch (e) { /* silent */ }
 }
 
+// ── Key-request modal ─────────────────────────────────────────────────────────
+function openKeyModal() {
+  const m = document.getElementById('key-modal');
+  if (!m) return;
+  m.classList.add('show');
+  m.setAttribute('aria-hidden', 'false');
+  const e = document.getElementById('contact-email');
+  if (e) setTimeout(() => e.focus(), 60);
+}
+function closeKeyModal() {
+  const m = document.getElementById('key-modal');
+  if (!m) return;
+  m.classList.remove('show');
+  m.setAttribute('aria-hidden', 'true');
+}
+// Close on overlay click (but not when clicking inside the dialog) and on Esc.
+document.addEventListener('click', (e) => {
+  const m = document.getElementById('key-modal');
+  if (m && e.target === m) closeKeyModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeKeyModal();
+});
+
 // ── Contact form (mailto) ─────────────────────────────────────────────────────
 function submitContact(ev) {
   ev.preventDefault();
@@ -1879,8 +1916,8 @@ h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
 .btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--accent);color:#fff;border:none;padding:13px 24px;border-radius:var(--radius);font-weight:600;font-size:14.5px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease);margin-top:18px}
 .btn-primary:hover{background:var(--accent-hover)}
 .btn-primary:active{background:var(--accent-dark)}
-.btn-primary:disabled{background:var(--text-tertiary);cursor:not-allowed}
-.spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
+.btn-primary:disabled{background:var(--accent);opacity:.6;cursor:not-allowed}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.45);border-top-color:#fff;border-radius:50%;animation:spin 700ms linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 .error-box{display:none;margin-top:14px;padding:12px;background:rgba(211,47,47,0.06);border:1px solid rgba(211,47,47,0.22);border-radius:var(--radius);color:#7a1a1a;font-size:13px;line-height:1.5}
@@ -1906,34 +1943,44 @@ h1,h2,h3,h4{font-weight:600;letter-spacing:-0.02em;margin:0;color:var(--text)}
 .form-state.fade-out{opacity:0;pointer-events:none}
 
 /* ── Footer ────────────────────────────────────────── */
-.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:48px 24px;margin-top:auto}
-.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:48px;align-items:flex-start}
-@media (max-width:760px){.site-footer-inner{flex-direction:column;gap:32px}}
-.footer-form{flex:0 0 60%}
-.footer-brand{flex:1;min-width:0}
-.footer-h{font-size:17px;font-weight:600;color:var(--text);letter-spacing:-0.02em;margin-bottom:6px}
-.footer-sub{font-size:13px;color:var(--text-secondary);margin-bottom:20px;line-height:1.55}
-.field-row{display:flex;gap:12px;margin-bottom:12px}
-.field-row > *{flex:1;min-width:0}
-.field-row.single{display:block}
-.fld{width:100%;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:13.5px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
-.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
-textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
-.footer-actions{display:flex;align-items:center;justify-content:flex-end;margin-top:12px;gap:12px}
-.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:12px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
-.contact-confirm.show{display:block}
-.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:12px}
-.contact-error.show{display:block}
-.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.site-footer{background:var(--surface-2);border-top:1px solid var(--border);padding:28px 24px;margin-top:auto}
+.site-footer-inner{max-width:960px;margin:0 auto;display:flex;gap:32px;align-items:center;justify-content:space-between}
+@media (max-width:640px){.site-footer-inner{flex-direction:column;gap:20px;align-items:flex-start}}
+.footer-brand-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .footer-mark{width:20px;height:20px}
 .footer-mark rect{fill:var(--accent)}
 .footer-name{font-size:14px;font-weight:600;color:var(--text)}
 .footer-version{font-size:12px;color:var(--text-tertiary);font-weight:500;margin-left:6px}
-.footer-rule{height:1px;background:var(--border);margin:14px 0}
 .footer-meta{font-size:12.5px;color:var(--text-secondary);line-height:1.7}
 .footer-meta a{color:var(--accent);text-decoration:none}
 .footer-meta a:hover{text-decoration:underline}
-.footer-fine{font-size:11.5px;color:var(--text-tertiary);margin-top:8px}
+.footer-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+@media (max-width:640px){.footer-right{align-items:flex-start}}
+.footer-contact{font-size:12px;color:var(--text-tertiary)}
+.footer-contact a{color:var(--accent);text-decoration:none}
+
+/* ── Modal (key request) ─────────────────────────── */
+.modal-overlay{position:fixed;inset:0;background:rgba(24,24,24,0.45);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px}
+.modal-overlay.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);max-width:460px;width:100%;padding:32px;position:relative;animation:modal-in 180ms var(--ease)}
+@keyframes modal-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.modal-close{position:absolute;top:14px;right:14px;border:none;background:transparent;cursor:pointer;color:var(--text-tertiary);padding:6px;display:inline-flex;border-radius:var(--radius);line-height:0}
+.modal-close:hover{color:var(--text);background:var(--surface-2)}
+.modal-eyebrow{font-size:11.5px;font-weight:600;letter-spacing:0.08em;color:var(--text-tertiary);text-transform:uppercase;margin-bottom:8px}
+.modal-title{font-size:21px;font-weight:600;letter-spacing:-0.02em;color:var(--text);margin:0 0 6px}
+.modal-sub{font-size:13.5px;color:var(--text-secondary);line-height:1.55;margin:0 0 18px}
+.modal-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin:14px 0 6px}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
+.modal .btn-primary,.modal .btn-secondary{width:auto;margin-top:0}
+.fld{width:100%;box-sizing:border-box;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);padding:10px 12px;font-size:14px;font-family:inherit;color:var(--text);transition:border 180ms var(--ease)}
+.fld:focus{outline:none;border-color:var(--accent);border-width:2px;padding:9px 11px}
+textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
+.btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--surface);color:var(--accent);border:1px solid var(--accent);padding:11px 22px;border-radius:var(--radius);font-weight:600;font-size:14px;font-family:inherit;cursor:pointer;transition:background 180ms var(--ease)}
+.btn-secondary:hover{background:var(--accent-soft)}
+.contact-confirm{display:none;font-size:13px;color:var(--success);font-weight:500;margin-top:14px;padding:10px 12px;background:rgba(0,133,66,0.06);border:1px solid rgba(0,133,66,0.18);border-radius:var(--radius)}
+.contact-confirm.show{display:block}
+.contact-error{display:none;font-size:13px;color:var(--danger);font-weight:500;margin-top:14px;padding:10px 12px;background:rgba(211,47,47,0.06);border:1px solid rgba(211,47,47,0.2);border-radius:var(--radius)}
+.contact-error.show{display:block}
 </style>
 </head>
 <body>
@@ -2003,7 +2050,7 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
 
       <p class="request-note">
         Don't have a key?
-        <a onclick="scrollToContact(event)">Use the form at the bottom of the page to request one.</a>
+        <a onclick="openKeyModal()">Request one here.</a>
       </p>
     </div>
 
@@ -2023,25 +2070,7 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
 <!-- ── Footer ───────────────────────────────────────────── -->
 <footer class="site-footer" id="site-footer">
   <div class="site-footer-inner">
-    <div class="footer-form">
-      <div class="footer-h">Need a key or renewal?</div>
-      <div class="footer-sub">Send a request and we'll get back to you within one business day.</div>
-      <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
-        <div class="field-row">
-          <input class="fld" type="email" id="contact-email" placeholder="Your email" autocomplete="email" required>
-          <input class="fld" type="text" id="contact-subject" value="License key request" required>
-        </div>
-        <div class="field-row single">
-          <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
-        </div>
-        <div class="footer-actions">
-          <button type="submit" class="btn-primary" id="contact-submit" style="width:auto;min-width:160px;margin-top:0">Request key</button>
-        </div>
-        <div class="contact-error" id="contact-error"></div>
-        <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
-      </form>
-    </div>
-    <div class="footer-brand">
+    <div class="footer-left">
       <div class="footer-brand-row">
         <svg class="footer-mark" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <rect x="2" y="2" width="12" height="12"/>
@@ -2053,15 +2082,40 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
         <span class="footer-name">Amazon Scraper</span>
         <span class="footer-version">v2.0</span>
       </div>
-      <div class="footer-rule"></div>
-      <div class="footer-meta">
-        Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a><br>
-        &copy; 2026 &middot; All rights reserved.
-      </div>
-      <div class="footer-fine">For licensed use only.</div>
+      <div class="footer-meta">For licensed use only &middot; &copy; 2026</div>
+    </div>
+    <div class="footer-right">
+      <button type="button" class="btn-secondary" onclick="openKeyModal()">Need a key or renewal?</button>
+      <div class="footer-contact">Contact: <a href="mailto:avtrixlab@gmail.com">avtrixlab@gmail.com</a></div>
     </div>
   </div>
 </footer>
+
+<!-- ── Key-request modal ─────────────────────────────────────── -->
+<div class="modal-overlay" id="key-modal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="km-title">
+    <button class="modal-close" type="button" onclick="closeKeyModal()" aria-label="Close">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div class="modal-eyebrow">Support request</div>
+    <h2 class="modal-title" id="km-title">Need a key or renewal?</h2>
+    <p class="modal-sub">Send a request and we'll get back to you within one business day.</p>
+    <form id="contact-form" onsubmit="return submitContact(event)" novalidate>
+      <label class="modal-label" for="contact-email">Your email</label>
+      <input class="fld" type="email" id="contact-email" placeholder="you@example.com" autocomplete="email" required>
+      <label class="modal-label" for="contact-subject">Subject</label>
+      <input class="fld" type="text" id="contact-subject" value="License key request" required>
+      <label class="modal-label" for="contact-message">Message</label>
+      <textarea class="fld" id="contact-message" rows="4" placeholder="Tell us briefly what you need — a new key, a renewal, or to release a machine slot."></textarea>
+      <div class="contact-error" id="contact-error"></div>
+      <div class="contact-confirm" id="contact-confirm">Your email client should open. If not, write to avtrixlab@gmail.com directly.</div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="closeKeyModal()">Cancel</button>
+        <button type="submit" class="btn-primary" id="contact-submit">Send request</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <script>
 const KEY_RE = /[^A-Z0-9]/g;
@@ -2222,6 +2276,30 @@ async function submitActivation() {
   }, 240);
   setTimeout(() => { window.location.href = '/'; }, 1500);
 }
+
+// ── Key-request modal ─────────────────────────────────────────────────────────
+function openKeyModal() {
+  const m = document.getElementById('key-modal');
+  if (!m) return;
+  m.classList.add('show');
+  m.setAttribute('aria-hidden', 'false');
+  const e = document.getElementById('contact-email');
+  if (e) setTimeout(() => e.focus(), 60);
+}
+function closeKeyModal() {
+  const m = document.getElementById('key-modal');
+  if (!m) return;
+  m.classList.remove('show');
+  m.setAttribute('aria-hidden', 'true');
+}
+// Close on overlay click (but not when clicking inside the dialog) and on Esc.
+document.addEventListener('click', (e) => {
+  const m = document.getElementById('key-modal');
+  if (m && e.target === m) closeKeyModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeKeyModal();
+});
 
 // ── Contact form (mailto) ─────────────────────────────────────────────────────
 function submitContact(ev) {

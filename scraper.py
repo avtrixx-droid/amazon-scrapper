@@ -3128,10 +3128,15 @@ def parse_pincodes_from_text(text: str) -> Dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        # A 6-digit pincode is all that's required. A city may optionally follow
+        # a comma; when omitted the pincode itself is used as the label so the
+        # Excel column header and worker logs still have a non-empty value.
         if "," in line:
             p, c = [x.strip() for x in line.split(",", 1)]
-            if p.isdigit() and len(p) == 6 and c:
-                pincodes[p] = c
+        else:
+            p, c = line, ""
+        if p.isdigit() and len(p) == 6:
+            pincodes[p] = c or p
     return pincodes
 
 
