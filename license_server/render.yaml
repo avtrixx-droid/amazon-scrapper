@@ -25,6 +25,11 @@ services:
         generateValue: true
       - key: PYTHON_VERSION
         value: 3.11.9
+      # /tmp is the only writable path on Render free tier (no persistent disk).
+      # WIPED on every deploy — fine for testing, swap to /var/data when you
+      # upgrade to a paid plan + uncomment the disk block below.
+      - key: LICENSE_DB_PATH
+        value: /tmp/licenses.db
 # To re-enable persistence after upgrading to a paid plan, append:
 #     disk:
 #       name: licenses-data
