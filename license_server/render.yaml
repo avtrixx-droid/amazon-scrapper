@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: amazon-scraper-license
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: LICENSE_SIGNING_SECRET
+        generateValue: true
+      - key: LICENSE_ADMIN_TOKEN
+        generateValue: true
+      - key: LICENSE_DB_PATH
+        value: /var/data/licenses.db
+      - key: PYTHON_VERSION
+        value: 3.11.9
+    disk:
+      name: licenses-data
+      mountPath: /var/data
+      sizeGB: 1

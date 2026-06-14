@@ -1,0 +1,103 @@
+# AmazonScraper License Server
+
+Tiny Flask + SQLite service that issues, activates, and validates license keys
+for the AmazonScraper desktop app. Designed for Render's free tier.
+
+## Local dev
+
+```bash
+cd license_server
+pip install -r requirements.txt
+LICENSE_SIGNING_SECRET=dev LICENSE_ADMIN_TOKEN=dev python app.py
+```
+
+Health check:
+
+```bash
+curl http://localhost:8000/healthz
+# → {"ok": true, "time": "..."}
+```
+
+DB defaults to `./licenses.db` (auto-created on first run). Override with
+`LICENSE_DB_PATH=/some/where/licenses.db`.
+
+## Deploy to Render
+
+1. Push this repo to GitHub.
+2. In Render: **New +** → **Blueprint** → connect the repo → pick
+   `license_server/render.yaml`.
+3. Render will:
+   - provision a free web service
+   - attach a 1 GB persistent disk at `/var/data` (SQLite lives there so it
+     survives deploys)
+   - auto-generate `LICENSE_SIGNING_SECRET` and `LICENSE_ADMIN_TOKEN`
+   - run `gunicorn app:app` and start hitting `/healthz`
+4. Note the deployed URL (e.g. `https://amazon-scraper-license.onrender.com`).
+5. **Important:** edit `license.py` in the desktop project and set
+   `LICENSE_SERVER_URL` to that URL before building the next release.
+6. Set the **same** `LICENSE_SIGNING_SECRET` as `AMZ_LICENSE_SECRET` in the
+   build environment before running PyInstaller — the client needs it to
+   verify signed tokens offline.
+
+## Admin CLI setup
+
+After deploy, copy your Render-generated `LICENSE_ADMIN_TOKEN` and create:
+
+```bash
+cat > ~/.amazon_scraper_admin <<'EOF'
+URL=https://amazon-scraper-license.onrender.com
+TOKEN=paste-the-render-generated-token-here
+EOF
+chmod 600 ~/.amazon_scraper_admin
+```
+
+Now you can use the CLI:
+
+```bash
+# Issue a 1-year, single-machine key
+python issue_key.py issue --customer "Lapcare" --days 365 --machines 1 \
+    --notes "PO-2026-001"
+
+# Show all keys
+python issue_key.py list
+
+# Extend a key by 30 days
+python issue_key.py extend --key AMZ-XXXX-XXXX-XXXX-XXXX --days 30
+
+# Revoke immediately
+python issue_key.py revoke --key AMZ-XXXX-XXXX-XXXX-XXXX
+
+# Free up an activation slot (so the customer can move to a new PC)
+python issue_key.py release-machine \
+    --key AMZ-XXXX-XXXX-XXXX-XXXX --machine-id 1f3...
+
+# Detailed view of a key + every machine it's on
+python issue_key.py info --key AMZ-XXXX-XXXX-XXXX-XXXX
+```
+
+## How the client behaves
+
+- On launch, the client loads `license.json` (in the user's app-data dir),
+  verifies the embedded signed token locally, and proceeds offline.
+- Every 7 days the client sends a `POST /heartbeat`. If the server says
+  `revoked` or `expired`, the client locks the UI and shows the appropriate
+  page.
+- If the server is unreachable, the client keeps working for up to **14 days**
+  after the last successful check. After that the user has to reconnect.
+- Result: the free Render dyno going to sleep is invisible to customers — it
+  wakes up on the next heartbeat, and even prolonged outages (up to two weeks)
+  don't disrupt usage.
+
+## Endpoints
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/healthz` | — | Render health check |
+| POST | `/activate` | — | First-time key activation, binds to machine_id |
+| POST | `/heartbeat` | — | Periodic re-validation |
+| POST | `/admin/issue` | Bearer | Issue a new key |
+| GET | `/admin/list` | Bearer | List all keys |
+| POST | `/admin/extend` | Bearer | Bump expiry |
+| POST | `/admin/revoke` | Bearer | Revoke a key |
+| POST | `/admin/release-machine` | Bearer | Free a slot |
+| GET | `/admin/info?key=K` | Bearer | Detail view |
