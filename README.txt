@@ -227,7 +227,7 @@ Config-only settings (edit config.py directly):
 
 
 =====================================================
-FILE REFERENCE
+FILE REFERENCE- ---
 =====================================================
 
   gui.py           The UI app — launched by the run scripts
