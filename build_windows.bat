@@ -58,18 +58,46 @@ if errorlevel 1 (
 )
 echo [OK] PyInstaller installed
 
-REM ── 5. Clean previous build artifacts ────────────────────────────────────────
+REM ── 5. Compile Cython extensions ──────────────────────────────────────────────
+echo.
+echo Compiling Cython extensions (license.py + scraper.py → native .pyd)...
+pip install "Cython>=3.0" --quiet
+python setup_cython.py build_ext --inplace
+if errorlevel 1 (
+    echo ERROR: Cython compilation failed
+    pause
+    exit /b 1
+)
+echo [OK] Cython extensions compiled
+
+REM ── 5b. Move .py source OUT during the build ────────────────────────────────
+REM  Guarantee no Python source for license/scraper ships in the bundle: move
+REM  the .py files aside so only the compiled .pyd remains while PyInstaller
+REM  runs. They are restored immediately after PyInstaller, success or fail.
+if not exist ".src_backup" mkdir ".src_backup"
+move /y license.py .src_backup\license.py >nul
+move /y scraper.py .src_backup\scraper.py >nul
+echo [OK] Python source moved aside - only compiled .pyd will be bundled
+
+REM ── 6. Clean previous build artifacts ───────────────────────────────────────
 echo.
 echo Cleaning previous build...
 if exist build rd /s /q build
 if exist "dist\AmazonScraper" rd /s /q "dist\AmazonScraper"
 
-REM ── 6. Run PyInstaller ────────────────────────────────────────────────────────
+REM ── 7. Run PyInstaller ───────────────────────────────────────────────────────
 echo.
 echo Building executable (this takes 2-5 minutes)...
 echo.
 pyinstaller amazon_scraper_windows.spec --clean --noconfirm
-if errorlevel 1 (
+set "PYI_RESULT=%errorlevel%"
+
+REM ── Restore .py source IMMEDIATELY (regardless of build result) ──────────────
+move /y .src_backup\license.py license.py >nul
+move /y .src_backup\scraper.py scraper.py >nul
+rd /s /q .src_backup 2>nul
+
+if not "%PYI_RESULT%"=="0" (
     echo.
     echo ERROR: PyInstaller build failed. Check output above for details.
     pause
@@ -97,7 +125,9 @@ copy "pincodes.txt"           "%DIST_DIR%\"    2>nul
 
 echo [OK] Distribution folder ready: %DIST_DIR%
 
-REM ── 8. Deactivate venv ────────────────────────────────────────────────────────
+REM (Python source already restored immediately after PyInstaller, above.)
+
+REM ── 9. Deactivate venv ──────────────────────────────────────────────────────
 call deactivate
 
 REM ── 9. Summary ───────────────────────────────────────────────────────────────
