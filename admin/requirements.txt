@@ -1,0 +1,1 @@
+# No third-party dependencies — the proxy uses only the Python standard library.
