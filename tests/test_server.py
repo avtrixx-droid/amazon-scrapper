@@ -173,12 +173,34 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.get_json()["reason"], "revoked")
 
-    def test_run_without_activation_blocked(self):
-        key = self._issue()
-        # No /activate call — machine not bound.
-        r = self._authorize(key)
+    def test_run_without_activation_self_heals(self):
+        # A valid key whose machine has no activation row (e.g. server DB reset)
+        # should self-bind on authorize-run, provided it's under max_machines.
+        key = self._issue(machines=1)
+        r = self._authorize(key)  # never called /activate
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        self.assertTrue(r.get_json()["ok"])
+        # The machine is now bound.
+        info = self.c.get(f"/admin/info?key={key}", headers=ADMIN).get_json()
+        self.assertEqual(len(info["activations"]), 1)
+
+    def test_self_heal_respects_max_machines(self):
+        # If the key is already at its machine limit, a different machine must
+        # NOT be silently bound by authorize-run.
+        key = self._issue(machines=1)
+        self._activate(key, machine="machine-1")
+        r = self._authorize(key, machine="machine-2")
         self.assertEqual(r.status_code, 403)
-        self.assertEqual(r.get_json()["reason"], "revoked")
+        self.assertEqual(r.get_json()["reason"], "max_machines_reached")
+
+    def test_unrevoke_restores_access(self):
+        key = self._issue()
+        self._activate(key)
+        self.c.post("/admin/revoke", json={"key": key}, headers=ADMIN)
+        self.assertEqual(self._authorize(key).status_code, 403)  # blocked
+        rv = self.c.post("/admin/unrevoke", json={"key": key}, headers=ADMIN)
+        self.assertTrue(rv.get_json()["ok"])
+        self.assertTrue(self._authorize(key).get_json()["ok"])  # works again
 
     def test_unknown_key_blocked(self):
         r = self._authorize("AMZ-NOPE-NOPE-NOPE-NOPE")
@@ -198,19 +220,34 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.get_json()["reason"], "expired")
 
-    def test_release_machine_blocks_runs(self):
-        key = self._issue()
-        self._activate(key)
-        self.assertTrue(self._authorize(key).get_json()["ok"])
+    def test_release_machine_frees_slot_for_another_machine(self):
+        # release-machine frees a slot so a DIFFERENT machine can take it.
+        # (Note: with self-heal, the original machine could reclaim the slot by
+        # running again while it's free — the hard kill switch is `revoke`.)
+        key = self._issue(machines=1)
+        self._activate(key, machine="machine-old")
+        self.assertTrue(self._authorize(key, machine="machine-old").get_json()["ok"])
 
+        # New machine is blocked while the slot is taken.
+        self.assertEqual(self._authorize(key, machine="machine-new").status_code, 403)
+
+        # Free the slot, then the new machine can bind.
         rel = self.c.post("/admin/release-machine",
-                          json={"key": key, "machine_id": MACHINE},
+                          json={"key": key, "machine_id": "machine-old"},
                           headers=ADMIN)
         self.assertTrue(rel.get_json()["ok"])
+        self.assertTrue(self._authorize(key, machine="machine-new").get_json()["ok"])
 
-        r = self._authorize(key)
-        self.assertEqual(r.status_code, 403)
-        self.assertEqual(r.get_json()["reason"], "revoked")
+    def test_revoke_is_the_hard_kill_switch(self):
+        # revoke blocks ALL machines regardless of self-heal — the real
+        # "stop misuse now" control.
+        key = self._issue(machines=2)
+        self._activate(key, machine="m1")
+        self.assertTrue(self._authorize(key, machine="m1").get_json()["ok"])
+        self.c.post("/admin/revoke", json={"key": key}, headers=ADMIN)
+        # Neither existing nor new machines can run.
+        self.assertEqual(self._authorize(key, machine="m1").status_code, 403)
+        self.assertEqual(self._authorize(key, machine="m2").status_code, 403)
 
     def test_max_machines_enforced(self):
         key = self._issue(machines=1)

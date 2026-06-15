@@ -174,6 +174,11 @@ def cmd_revoke(args, url: str, token: str) -> None:
     print(f"Revoked: {data['key']}")
 
 
+def cmd_unrevoke(args, url: str, token: str) -> None:
+    data = post(url, "/admin/unrevoke", token, {"key": args.key})
+    print(f"Un-revoked (re-enabled): {data['key']}")
+
+
 def cmd_release_machine(args, url: str, token: str) -> None:
     data = post(url, "/admin/release-machine", token,
                 {"key": args.key, "machine_id": args.machine_id})
@@ -232,6 +237,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_revoke = sub.add_parser("revoke", help="Revoke a key.")
     p_revoke.add_argument("--key", required=True)
     p_revoke.set_defaults(func=cmd_revoke)
+
+    p_unrevoke = sub.add_parser("unrevoke", help="Re-enable a revoked key.")
+    p_unrevoke.add_argument("--key", required=True)
+    p_unrevoke.set_defaults(func=cmd_unrevoke)
 
     p_release = sub.add_parser("release-machine",
                                help="Release one machine's activation slot.")

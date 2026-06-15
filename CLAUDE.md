@@ -721,6 +721,23 @@ run requires server authorization via `POST /authorize-run`.
 6. On revoke/expire: the server rejects the authorization and the client
    shows a friendly error.
 
+### Enforcement model (what actually blocks misuse)
+
+`/authorize-run` enforces, in order: **revoked** (hard kill — blocks ALL
+machines on the key) → **expired** → **machine binding under max_machines**.
+
+**Self-heal:** if the key is valid/non-revoked/non-expired but this machine
+has no activation row (server DB reset, migration, or a client that only kept
+its license file), `/authorize-run` re-binds the machine **provided it's under
+`max_machines`**. This prevents locking out a legitimate paid user when the
+server loses an activation row. `max_machines` is still enforced, so a new
+(N+1)th machine is refused (`max_machines_reached`).
+
+**Consequence for `release-machine`:** it frees a slot (to move a license to a
+new machine) but is NOT a permanent per-machine block — a valid key under its
+limit can reclaim a free slot by running again. The hard "stop misuse now"
+control is **`revoke`** (kills the whole key); `unrevoke` re-enables it.
+
 ### Where keys live
 
 - **Server-side database** (PostgreSQL on Render): `keys`, `activations`,
@@ -735,7 +752,7 @@ cd license_server
 python issue_key.py issue --customer "Lapcare" --days 365 --machines 1
 ```
 
-Other admin ops: `list`, `extend`, `revoke`, `release-machine`, `info`.
+Other admin ops: `list`, `extend`, `revoke`, `unrevoke`, `release-machine`, `info`.
 See `license_server/README.md` for the full guide.
 
 ### Secrets

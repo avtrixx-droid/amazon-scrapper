@@ -421,15 +421,23 @@ def check_license_status() -> dict:
 
 
 # ── Run authorization ─────────────────────────────────────────────────────────
-def authorize_run(asin_count: int = 0, pincode_count: int = 0) -> tuple[bool, str, str, str]:
+# Reasons that mean "the license itself is the problem" — the user should be
+# routed to the activation page (to enter a new key or contact for one), not
+# just shown a transient error.
+RELICENSE_REASONS = ("key_not_found", "revoked", "expired", "max_machines_reached", "no_license")
+
+
+def authorize_run(asin_count: int = 0, pincode_count: int = 0) -> tuple[bool, str, str, str, str]:
     """Request server authorization before a scraping run.
 
-    Returns (authorized, error_message, run_token, expires_at).
+    Returns (authorized, error_message, run_token, expires_at, reason).
+    `reason` is "" on success, one of RELICENSE_REASONS for a license problem,
+    or "network"/"offline_expired" for connectivity problems.
     On network failure, falls back to 24-hour cached authorization.
     """
     data = load_license()
     if not data:
-        return False, "No license found. Please activate first.", "", ""
+        return False, "No license found. Please activate first.", "", "", "no_license"
 
     key = data.get("key", "")
     machine_id = data.get("machine_id") or get_machine_id()
@@ -451,6 +459,7 @@ def authorize_run(asin_count: int = 0, pincode_count: int = 0) -> tuple[bool, st
             True, "",
             resp.get("run_token", ""),
             resp.get("expires_at", ""),
+            "",
         )
 
     if net_err:
@@ -459,10 +468,10 @@ def authorize_run(asin_count: int = 0, pincode_count: int = 0) -> tuple[bool, st
 
     reason = (resp or {}).get("reason", "unknown")
     log.info("authorize_run rejected: %s", reason)
-    return False, _friendly(reason, resp), "", ""
+    return False, _friendly(reason, resp), "", "", reason
 
 
-def _check_offline_grace(data: dict) -> tuple[bool, str, str, str]:
+def _check_offline_grace(data: dict) -> tuple[bool, str, str, str, str]:
     """Allow the run if the last successful authorization was within 24 hours."""
     last_auth_str = data.get("last_authorized_at", "")
     last_auth_dt = _parse_iso(last_auth_str)
@@ -470,7 +479,7 @@ def _check_offline_grace(data: dict) -> tuple[bool, str, str, str]:
         return (
             False,
             "Could not reach the license server. Please check your internet connection.",
-            "", "",
+            "", "", "network",
         )
 
     now = datetime.now(timezone.utc)
@@ -479,11 +488,11 @@ def _check_offline_grace(data: dict) -> tuple[bool, str, str, str]:
     if hours_since < OFFLINE_GRACE_HOURS:
         hours_left = max(1, int(OFFLINE_GRACE_HOURS - hours_since))
         log.info("authorize_run: offline grace, %d hours remaining", hours_left)
-        return True, "", "", ""
+        return True, "", "", "", ""
 
     return (
         False,
         "Could not reach the license server and offline grace period (24 hours) has expired. "
         "Please check your internet connection and try again.",
-        "", "",
+        "", "", "offline_expired",
     )
