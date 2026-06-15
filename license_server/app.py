@@ -7,6 +7,7 @@ Flask + PostgreSQL. Designed to run on Render with a managed Postgres database
 Endpoints:
   POST /activate        — first-time key activation, binds to machine_id
   POST /heartbeat       — periodic re-validation (catches revocation)
+  POST /authorize-run   — per-run authorization gate (returns short-lived run token)
   GET  /healthz         — Render health check
   POST /admin/issue     — issue a new key (Bearer auth)
   GET  /admin/list      — list all keys (Bearer auth)
@@ -129,6 +130,22 @@ def init_db():
                     last_heartbeat TEXT NOT NULL,
                     app_version TEXT DEFAULT '',
                     PRIMARY KEY (key, machine_id),
+                    FOREIGN KEY (key) REFERENCES keys(key)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id SERIAL PRIMARY KEY,
+                    key TEXT NOT NULL,
+                    machine_id TEXT NOT NULL,
+                    asin_count INTEGER NOT NULL DEFAULT 0,
+                    pincode_count INTEGER NOT NULL DEFAULT 0,
+                    app_version TEXT DEFAULT '',
+                    run_token TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
                     FOREIGN KEY (key) REFERENCES keys(key)
                 )
                 """
@@ -334,6 +351,66 @@ def heartbeat():
     })
 
 
+# ── Run authorization ──────────────────────────────────────────────────────────
+@app.route("/authorize-run", methods=["POST"])
+def authorize_run():
+    """Per-run gate. Returns a short-lived run token the client checks before
+    scraping. Also logs every run attempt for usage analytics."""
+    data = json_body()
+    key = (data.get("key") or "").strip().upper()
+    machine_id = (data.get("machine_id") or "").strip()
+    asin_count = int(data.get("asin_count") or 0)
+    pincode_count = int(data.get("pincode_count") or 0)
+    app_version = (data.get("app_version") or "").strip()
+
+    if not key or not machine_id:
+        return jsonify({"ok": False, "reason": "bad_request"}), 400
+
+    db = get_db()
+
+    row = db.execute("SELECT * FROM keys WHERE key = %s", (key,)).fetchone()
+    if row is None or row["revoked"]:
+        log.info("authorize-run: revoked-or-missing key=%s", key)
+        return jsonify({"ok": False, "reason": "revoked"}), 403
+
+    expires_at_key = row["expires_at"]
+    if parse_iso(expires_at_key) < datetime.now(timezone.utc):
+        log.info("authorize-run: expired key=%s exp=%s", key, expires_at_key)
+        return jsonify({"ok": False, "reason": "expired", "expires_at": expires_at_key}), 403
+
+    activation = db.execute(
+        "SELECT * FROM activations WHERE key = %s AND machine_id = %s",
+        (key, machine_id),
+    ).fetchone()
+    if activation is None:
+        log.info("authorize-run: no activation key=%s machine=%s", key, machine_id[:12])
+        return jsonify({"ok": False, "reason": "revoked"}), 403
+
+    run_token = secrets.token_urlsafe(32)
+    requested_at = now_iso()
+    run_expires = (
+        datetime.now(timezone.utc) + timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    db.execute(
+        "INSERT INTO runs (key, machine_id, asin_count, pincode_count, "
+        "app_version, run_token, requested_at, expires_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (key, machine_id, asin_count, pincode_count,
+         app_version, run_token, requested_at, run_expires),
+    )
+    db.commit()
+    log.info("authorize-run: ok key=%s machine=%s asins=%d pincodes=%d",
+             key, machine_id[:12], asin_count, pincode_count)
+
+    return jsonify({
+        "ok": True,
+        "run_token": run_token,
+        "expires_at": run_expires,
+        "server_time": requested_at,
+    })
+
+
 # ── Admin endpoints ────────────────────────────────────────────────────────────
 @app.route("/admin/issue", methods=["POST"])
 @require_admin
@@ -483,6 +560,24 @@ def admin_info():
         "key": dict(row),
         "activations": [dict(a) for a in activations],
     })
+
+
+@app.route("/admin/runs", methods=["GET"])
+@require_admin
+def admin_runs():
+    """List recent run authorizations. Optional ?key= filter."""
+    key = (request.args.get("key") or "").strip().upper()
+    db = get_db()
+    if key:
+        rows = db.execute(
+            "SELECT * FROM runs WHERE key = %s ORDER BY requested_at DESC LIMIT 100",
+            (key,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM runs ORDER BY requested_at DESC LIMIT 100"
+        ).fetchall()
+    return jsonify({"ok": True, "runs": [dict(r) for r in rows]})
 
 
 # ── Init + entry ───────────────────────────────────────────────────────────────

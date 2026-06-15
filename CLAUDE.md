@@ -29,7 +29,7 @@ Everything must be crash-safe, human-readable in output, and never expose Python
 AmazonScraper/
 ├── scraper.py                    ← core scraper engine — vendor never touches
 ├── gui.py                        ← Flask web UI — entry point for built app
-├── license.py                    ← client license module (activation + heartbeat + grace)
+├── license.py                    ← client license module (activation + server-side run auth)
 ├── config.py                     ← vendor ONLY edits this (CLI mode)
 ├── asins.txt                     ← vendor pastes ASINs (one per line, # for comments)
 ├── pincodes.txt                  ← vendor edits pincodes
@@ -44,10 +44,12 @@ AmazonScraper/
 ├── README.txt                    ← vendor-facing, non-technical instructions
 ├── README_VENDOR_APP.txt         ← shipped with the built app
 ├── templates/                    ← Flask HTML templates for gui.py
+├── setup_cython.py               ← Cython build: compiles license.py + scraper.py to native .so/.pyd
 ├── tests/                        ← unittest suite (Selenium-free parser tests)
-│   └── test_delivery_parser.py   ← 42 tests for the delivery priority resolver
-├── license_server/               ← Render-hosted Flask + SQLite license service
-│   ├── app.py                    ← server: /activate, /heartbeat, /admin/*, /healthz
+│   ├── test_delivery_parser.py   ← 94 tests for the delivery priority resolver
+│   └── test_license.py           ← license authorization + grace period tests
+├── license_server/               ← Render-hosted Flask + PostgreSQL license service
+│   ├── app.py                    ← server: /activate, /heartbeat, /authorize-run, /admin/*, /healthz
 │   ├── issue_key.py              ← admin CLI: issue/list/extend/revoke/release-machine
 │   ├── requirements.txt          ← server-side deps (flask, itsdangerous, gunicorn, requests)
 │   ├── render.yaml               ← one-click Render Blueprint
@@ -686,9 +688,20 @@ Format: `ASIN[,Item Name[,Lapcare Item Code]]`
 
 ## License System
 
-Online activation + offline-tolerant heartbeat gate. The desktop app is
-useless until the user enters a valid key on first launch; after that it
-runs offline for up to 14 days at a stretch.
+Online activation + server-authorized run gate. The desktop app is
+useless until the user enters a valid key on first launch. Every scraping
+run requires server authorization via `POST /authorize-run`.
+
+### Anti-Reverse-Engineering Layers
+
+1. **Cython compilation** — `license.py` and `scraper.py` are compiled to
+   native C extensions (`.so`/`.pyd`) before PyInstaller runs. These cannot
+   be decompiled back to Python source.
+2. **No signing secret on client** — `AMZ_LICENSE_SECRET` is no longer baked
+   into the build. The client cannot verify or forge tokens locally.
+3. **Server-side run gating** — every scraping run calls `POST /authorize-run`
+   on the server. The server validates the key, machine, and logs the run.
+   Without server approval, the scraper won't start.
 
 ### Flow
 
@@ -697,25 +710,23 @@ runs offline for up to 14 days at a stretch.
    → redirected to `/activate`.
 2. Activation page posts the key (`AMZ-XXXX-XXXX-XXXX-XXXX`) to
    `POST /activate` on the Render-hosted server. Server binds the key to
-   `machine_id` (SHA-256 of platform UUID + MAC), returns an
-   itsdangerous-signed token + `expires_at`.
-3. Client writes `license.json` to the user's app-data dir
-   (`%APPDATA%/AmazonScraper/` on Windows, `~/Library/Application Support/...`
-   on macOS, `~/.config/AmazonScraper/` on Linux).
-4. On every launch the client verifies the token *locally* — no network
-   required. If `last_check` is more than 7 days old it sends a
-   `POST /heartbeat`; on revoke/expire the server says so and the client
-   locks the UI. On network failure the client falls into a 14-day grace
-   period (banner shown), after which the user must reconnect.
+   `machine_id` (SHA-256 of platform UUID + MAC).
+3. Client writes `license.json` to the user's app-data dir.
+4. On every scraping run, `gui.py` calls `license.authorize_run()` which
+   POSTs to `/authorize-run`. Server validates the key/machine and returns
+   a short-lived run token (1 hour). On success, `last_authorized_at` is
+   cached in `license.json`.
+5. On network failure: if `last_authorized_at` is within 24 hours, the run
+   is allowed (offline grace). Beyond 24 hours, the user must reconnect.
+6. On revoke/expire: the server rejects the authorization and the client
+   shows a friendly error.
 
 ### Where keys live
 
-- **Server-side database** (`licenses.db`, SQLite): one row per key,
-  one row per (key, machine_id) activation. On Render this lives on the
-  persistent disk at `/var/data/licenses.db`.
-- **Client-side state** (`license.json`): contains the signed token, the
-  expiry timestamp, the customer name, the activated machine_id, and the
-  `last_check` timestamp.
+- **Server-side database** (PostgreSQL on Render): `keys`, `activations`,
+  and `runs` tables. The `runs` table logs every run authorization request.
+- **Client-side state** (`license.json`): key, machine_id, customer,
+  expires_at, last_check, last_authorized_at.
 
 ### Issuing keys
 
@@ -731,15 +742,12 @@ See `license_server/README.md` for the full guide.
 
 - `LICENSE_SIGNING_SECRET` (server env): used by itsdangerous to sign tokens.
 - `LICENSE_ADMIN_TOKEN` (server env): Bearer auth for `/admin/*` endpoints.
-- `AMZ_LICENSE_SECRET` (client build env): **must equal**
-  `LICENSE_SIGNING_SECRET`. PyInstaller bakes it in via the build environment.
-  If absent, the client raises at first license check.
+- `AMZ_LICENSE_SECRET` is **no longer required** on the client side.
 
 ### Free Render tier caveat
 
-The free Render web service sleeps after 15 min idle. The client's 14-day
-offline grace makes this invisible: a sleeping server just makes the next
-heartbeat take ~30 seconds (we set the request timeout to 35).
+The free Render web service sleeps after 15 min idle. The 24-hour offline
+grace and 35-second request timeout handle cold starts transparently.
 
 ---
 
@@ -813,7 +821,8 @@ heartbeat take ~30 seconds (we set the request timeout to 35).
 - [x] ~~`--no-headless` flag for vendor to run visible Chrome when debugging CAPTCHAs~~
 - [ ] Replace placeholder `support@yourdomain.com` in the activation page (`ACTIVATE_HTML` in `gui.py`)
 - [ ] Set `LICENSE_SERVER_URL` in `license.py` to the real Render URL after the first deploy
-- [ ] Configure `AMZ_LICENSE_SECRET` in the CI/build environment so PyInstaller bakes it in
+- [x] ~~Configure `AMZ_LICENSE_SECRET` in the CI/build environment~~ — no longer needed; server-side auth replaces local token verification
+- [x] ~~Anti-reverse-engineering hardening~~ — Cython compilation + removed client secret + server-side run gating
 
 ---
 
@@ -842,12 +851,17 @@ heartbeat take ~30 seconds (we set the request timeout to 35).
   matching picks them up automatically. Adding hardcoded IDs is a long-term
   liability. Add new patterns only if a new family of IDs appears (different
   prefix entirely), not for each new suffix.
-- **The license check must run before any worker spawns.** Never move the
-  `_license_ok_for_run()` gate inside `/start` or `/retry` to after the
-  multiprocessing.Process spawn. The whole point is to refuse the run cheaply,
-  not to refuse it after Chrome has already started. Likewise, never call
-  `_get_license_status()` from inside `_poll`, `_worker_entry`, `_handle`,
-  `_build_excel`, or `_retry_failures` — those are downstream of the gate.
+- **The license check must run before any worker spawns.** The `authorize_run()`
+  call in `/start` and `/retry` must happen BEFORE `multiprocessing.Process`
+  spawn. The whole point is to refuse the run cheaply, not to refuse it after
+  Chrome has already started. Never call license functions from inside `_poll`,
+  `_worker_entry`, `_handle`, `_build_excel`, or `_retry_failures`.
 - **Don't move `LICENSE_SERVER_URL` into a config file the vendor can edit.**
   The vendor must not be able to redirect the activation flow to a fake
   server. It lives as a constant in `license.py`, baked into the build.
+- **Never re-introduce `AMZ_LICENSE_SECRET` on the client side.** The signing
+  secret was removed to prevent reverse engineers from extracting it and
+  forging tokens. All authorization must go through the server.
+- **Never skip the Cython compilation step in build scripts.** The `.py` source
+  files must NOT ship in the PyInstaller bundle. The build scripts compile to
+  `.so`/`.pyd` first and PyInstaller bundles the native extensions.

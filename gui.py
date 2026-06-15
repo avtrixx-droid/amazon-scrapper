@@ -155,11 +155,6 @@ def _get_license_status(force: bool = False) -> dict:
     return _license_status
 
 
-def _license_ok_for_run() -> bool:
-    """True iff a scraping run is allowed (valid or grace)."""
-    return _get_license_status().get("status") in ("valid", "grace")
-
-
 # ── Background poll thread (reads multiprocessing.Queue → updates _st) ────────
 
 def _poll():
@@ -579,8 +574,6 @@ def license_status_route():
 
 @app.route("/start", methods=["POST"])
 def start():
-    if not _license_ok_for_run():
-        return jsonify({"ok": False, "error": "license_invalid"})
     if _st["running"]:
         return jsonify({"ok": False, "error": "Already running"})
 
@@ -605,6 +598,13 @@ def start():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
+    # Server-side run authorization — the hard gate.
+    authorized, auth_error, run_token, run_expires = lic.authorize_run(
+        asin_count=len(asin_entries), pincode_count=len(pincodes),
+    )
+    if not authorized:
+        return jsonify({"ok": False, "error": auth_error or "license_invalid"})
+
     # Run settings are hard-coded — vendor no longer controls them.
     num_workers = min(4, len(pincodes))
     settings = _default_settings()
@@ -620,6 +620,8 @@ def start():
         "worker_status": {}, "status_text": "Running…",
         "xlsx_path": None,
         "retrying": False,
+        "run_token": run_token,
+        "run_expires": run_expires,
     })
 
     _log(
@@ -652,14 +654,18 @@ def start():
 @app.route("/retry", methods=["POST"])
 def retry():
     """Tier B — manual retry over the current worker_failed list."""
-    if not _license_ok_for_run():
-        return jsonify({"ok": False, "error": "license_invalid"})
     if _st["running"] or _st["retrying"]:
         return jsonify({"ok": False, "error": "A run is already in progress."})
 
     combos = _dedup_failed(_st["worker_failed"])
     if not combos:
         return jsonify({"ok": False, "error": "Nothing to retry — no failed combinations."})
+
+    authorized, auth_error, _, _ = lic.authorize_run(
+        asin_count=len(combos), pincode_count=1,
+    )
+    if not authorized:
+        return jsonify({"ok": False, "error": auth_error or "license_invalid"})
 
     _st["retrying"] = True
     _st["running"] = True

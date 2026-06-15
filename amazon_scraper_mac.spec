@@ -31,10 +31,17 @@ except ImportError:
 
 all_datas = certifi_datas + selenium_datas
 
+# ── Collect Cython-compiled extensions (.so on macOS) ─────────────────────────
+import glob
+cython_binaries = []
+for pattern in ["scraper*.so", "license*.so"]:
+    for f in glob.glob(pattern):
+        cython_binaries.append((f, "."))
+
 a = Analysis(
     ["gui.py"],
     pathex=["."],
-    binaries=[],
+    binaries=cython_binaries,
     datas=all_datas,
     hiddenimports=[
         # ── Flask / Werkzeug / Jinja2 ──
@@ -147,12 +154,8 @@ a = Analysis(
         "psutil._psutil_linux",
         "psutil._psutil_windows",
         "psutil._common",
-        # ── License client (online activation) ──
-        # NOTE: the build env MUST export AMZ_LICENSE_SECRET (must equal the server's
-        # LICENSE_SIGNING_SECRET). PyInstaller bakes the python source verbatim; the
-        # secret is read from env at runtime via os.environ, NOT baked in here.
+        # ── License client (server-side authorization) ──
         "license",
-        "_build_config",   # written by CI before pyinstaller runs; baked into bundle
         "itsdangerous.url_safe",
         "itsdangerous.signer",
         "itsdangerous.serializer",

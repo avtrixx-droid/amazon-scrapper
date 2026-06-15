@@ -47,7 +47,30 @@ echo "Installing PyInstaller..."
 pip install pyinstaller pyinstaller-hooks-contrib --quiet
 echo "[OK] PyInstaller installed"
 
-# ── 5. Clean previous builds ──────────────────────────────────────────────────
+# ── 5. Compile Cython extensions ──────────────────────────────────────────────
+echo ""
+echo "Compiling Cython extensions (license.py + scraper.py → native .so)..."
+pip install "Cython>=3.0" --quiet
+python3 setup_cython.py build_ext --inplace
+echo "[OK] Cython extensions compiled"
+
+# ── 5b. Move .py source for compiled modules OUT during the build ────────────
+#  Guarantee no Python source for license/scraper ships in the bundle: move the
+#  .py files aside so only the compiled .so remains while PyInstaller runs.
+#  A trap restores them on ANY exit (success, failure, or Ctrl-C) so a failed
+#  build never leaves your working tree missing source files.
+mkdir -p .src_backup
+restore_sources() {
+    [ -f .src_backup/license.py ] && mv -f .src_backup/license.py license.py
+    [ -f .src_backup/scraper.py ] && mv -f .src_backup/scraper.py scraper.py
+    rm -rf .src_backup
+}
+trap restore_sources EXIT
+mv license.py .src_backup/license.py
+mv scraper.py .src_backup/scraper.py
+echo "[OK] Python source moved aside — only compiled .so will be bundled"
+
+# ── 6. Clean previous builds ─────────────────────────────────────────────────
 echo ""
 echo "Cleaning previous build..."
 rm -rf build
@@ -55,7 +78,7 @@ rm -rf "dist/AmazonScraper.app"
 rm -rf "dist/AmazonScraper"
 rm -rf "dist/AmazonScraper_Mac_Release"
 
-# ── 6. Build .app ─────────────────────────────────────────────────────────────
+# ── 7. Build .app ─────────────────────────────────────────────────────────────
 echo ""
 echo "Building .app bundle (this takes 3-7 minutes)..."
 echo ""
@@ -125,7 +148,10 @@ LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 echo "[OK] Fallback launcher created"
 
-# ── 10. Deactivate venv ───────────────────────────────────────────────────────
+# ── Restore .py source files (also covered by the EXIT trap) ─────────────────
+restore_sources
+
+# ── 12. Deactivate venv ──────────────────────────────────────────────────────
 deactivate
 
 # ── 11. Summary ───────────────────────────────────────────────────────────────

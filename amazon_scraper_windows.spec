@@ -4,11 +4,9 @@
 # Run with:  pyinstaller amazon_scraper_windows.spec
 # Output:    dist\AmazonScraper\AmazonScraper.exe
 #
-# LICENSE NOTE:
-#   The build environment MUST have `AMZ_LICENSE_SECRET` set before invoking
-#   PyInstaller. license.py reads it at runtime via os.environ.get(...) and
-#   uses it as the itsdangerous verification key for the signed license token.
-#   This value must match `LICENSE_SIGNING_SECRET` on the license server.
+# NOTE: AMZ_LICENSE_SECRET is no longer required in the build environment.
+# The client uses server-side authorization (POST /authorize-run) instead
+# of local token verification.
 
 import sys
 import os
@@ -33,10 +31,17 @@ except ImportError:
 
 all_datas = certifi_datas + selenium_datas
 
+# ── Collect Cython-compiled extensions (.pyd on Windows) ──────────────────────
+import glob
+cython_binaries = []
+for pattern in ["scraper*.pyd", "license*.pyd"]:
+    for f in glob.glob(pattern):
+        cython_binaries.append((f, "."))
+
 a = Analysis(
     ["gui.py"],
     pathex=["."],
-    binaries=[],
+    binaries=cython_binaries,
     datas=all_datas,
     hiddenimports=[
         # ── Flask / Werkzeug / Jinja2 ──
@@ -148,9 +153,8 @@ a = Analysis(
         "psutil._psutil_linux",
         "psutil._psutil_osx",
         "psutil._common",
-        # ── License client (online activation + offline grace) ──
+        # ── License client (server-side authorization) ──
         "license",
-        "_build_config",   # written by CI before pyinstaller runs; baked into bundle
         "winreg",
         "itsdangerous",
         "itsdangerous.url_safe",
