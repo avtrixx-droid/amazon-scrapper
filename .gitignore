@@ -30,3 +30,4 @@ config.local.py
 
 # License signing secret + server URL — written by CI before PyInstaller, never commit
 _build_config.py
+/outputfiles/
