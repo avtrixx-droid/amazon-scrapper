@@ -108,7 +108,7 @@ class AuthorizeRunSuccessTests(_TempLicenseDir, unittest.TestCase):
             "server_time": _now_iso(),
         }
         with patch.object(lic, "_post", return_value=(True, mock_resp, "")):
-            ok, err, token, expires = lic.authorize_run(asin_count=10, pincode_count=3)
+            ok, err, token, expires, reason = lic.authorize_run(asin_count=10, pincode_count=3)
 
         self.assertTrue(ok)
         self.assertEqual(err, "")
@@ -143,10 +143,12 @@ class AuthorizeRunRejectionTests(_TempLicenseDir, unittest.TestCase):
 
         mock_resp = {"ok": False, "reason": "revoked"}
         with patch.object(lic, "_post", return_value=(False, mock_resp, "")):
-            ok, err, _, _ = lic.authorize_run()
+            ok, err, _, _, reason = lic.authorize_run()
 
         self.assertFalse(ok)
         self.assertIn("revoked", err.lower())
+        self.assertEqual(reason, "revoked")
+        self.assertIn(reason, lic.RELICENSE_REASONS)  # drives redirect to /activate
 
     def test_expired_key_returns_false(self):
         self._write_license({
@@ -157,15 +159,44 @@ class AuthorizeRunRejectionTests(_TempLicenseDir, unittest.TestCase):
 
         mock_resp = {"ok": False, "reason": "expired"}
         with patch.object(lic, "_post", return_value=(False, mock_resp, "")):
-            ok, err, _, _ = lic.authorize_run()
+            ok, err, _, _, reason = lic.authorize_run()
 
         self.assertFalse(ok)
         self.assertIn("expired", err.lower())
+        self.assertEqual(reason, "expired")
+        self.assertIn(reason, lic.RELICENSE_REASONS)
+
+    def test_key_not_found_is_relicense(self):
+        self._write_license({
+            "key": "AMZ-TEST-1234-ABCD-5678",
+            "machine_id": "abc123",
+            "expires_at": _days_from_now(30),
+        })
+        mock_resp = {"ok": False, "reason": "key_not_found"}
+        with patch.object(lic, "_post", return_value=(False, mock_resp, "")):
+            ok, err, _, _, reason = lic.authorize_run()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "key_not_found")
+        self.assertIn(reason, lic.RELICENSE_REASONS)
 
     def test_no_license_file_returns_false(self):
-        ok, err, _, _ = lic.authorize_run()
+        ok, err, _, _, reason = lic.authorize_run()
         self.assertFalse(ok)
         self.assertIn("activate", err.lower())
+        self.assertEqual(reason, "no_license")
+
+    def test_network_failure_is_not_relicense(self):
+        # A connectivity problem must NOT route the user to re-activation.
+        self._write_license({
+            "key": "AMZ-TEST-1234-ABCD-5678",
+            "machine_id": "abc123",
+            "expires_at": _days_from_now(30),
+            "last_authorized_at": _hours_ago(48),  # grace expired
+        })
+        with patch.object(lic, "_post", return_value=(False, {}, "network: timeout")):
+            ok, err, _, _, reason = lic.authorize_run()
+        self.assertFalse(ok)
+        self.assertNotIn(reason, lic.RELICENSE_REASONS)
 
 
 # ── Offline grace ─────────────────────────────────────────────────────────────
@@ -181,7 +212,7 @@ class OfflineGraceTests(_TempLicenseDir, unittest.TestCase):
         })
 
         with patch.object(lic, "_post", return_value=(False, {}, "network: timeout")):
-            ok, err, _, _ = lic.authorize_run()
+            ok, err, _, _, reason = lic.authorize_run()
 
         self.assertTrue(ok)
 
@@ -194,7 +225,7 @@ class OfflineGraceTests(_TempLicenseDir, unittest.TestCase):
         })
 
         with patch.object(lic, "_post", return_value=(False, {}, "network: timeout")):
-            ok, err, _, _ = lic.authorize_run()
+            ok, err, _, _, reason = lic.authorize_run()
 
         self.assertFalse(ok)
         self.assertIn("24 hours", err)
@@ -207,7 +238,7 @@ class OfflineGraceTests(_TempLicenseDir, unittest.TestCase):
         })
 
         with patch.object(lic, "_post", return_value=(False, {}, "network: DNS failure")):
-            ok, err, _, _ = lic.authorize_run()
+            ok, err, _, _, reason = lic.authorize_run()
 
         self.assertFalse(ok)
         self.assertIn("internet", err.lower())

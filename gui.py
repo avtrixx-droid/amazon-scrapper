@@ -599,11 +599,16 @@ def start():
         return jsonify({"ok": False, "error": str(e)})
 
     # Server-side run authorization — the hard gate.
-    authorized, auth_error, run_token, run_expires = lic.authorize_run(
+    authorized, auth_error, run_token, run_expires, reason = lic.authorize_run(
         asin_count=len(asin_entries), pincode_count=len(pincodes),
     )
     if not authorized:
-        return jsonify({"ok": False, "error": auth_error or "license_invalid"})
+        return jsonify({
+            "ok": False,
+            "error": auth_error or "license_invalid",
+            "relicense": reason in lic.RELICENSE_REASONS,
+            "reason": reason,
+        })
 
     # Run settings are hard-coded — vendor no longer controls them.
     num_workers = min(4, len(pincodes))
@@ -661,11 +666,16 @@ def retry():
     if not combos:
         return jsonify({"ok": False, "error": "Nothing to retry — no failed combinations."})
 
-    authorized, auth_error, _, _ = lic.authorize_run(
+    authorized, auth_error, _, _, reason = lic.authorize_run(
         asin_count=len(combos), pincode_count=1,
     )
     if not authorized:
-        return jsonify({"ok": False, "error": auth_error or "license_invalid"})
+        return jsonify({
+            "ok": False,
+            "error": auth_error or "license_invalid",
+            "relicense": reason in lic.RELICENSE_REASONS,
+            "reason": reason,
+        })
 
     _st["retrying"] = True
     _st["running"] = True
@@ -1451,7 +1461,8 @@ async function startScraping() {
   }
   if (!data.ok) {
     setStartLoading(false);
-    if (data.error === 'license_invalid') {
+    if (data.error === 'license_invalid' || data.relicense) {
+      try { sessionStorage.setItem('denied_reason', data.reason || ''); } catch (e) {}
       window.location.href = '/activate';
       return;
     }
@@ -1519,7 +1530,8 @@ async function retryFailed() {
     return;
   }
   if (!data.ok) {
-    if (data.error === 'license_invalid') {
+    if (data.error === 'license_invalid' || data.relicense) {
+      try { sessionStorage.setItem('denied_reason', data.reason || ''); } catch (e) {}
       window.location.href = '/activate';
       return;
     }
@@ -2016,14 +2028,18 @@ textarea.fld{min-height:96px;resize:vertical;line-height:1.55}
 
     <div class="form-state" id="form-state">
 
+      <!-- JS-driven banner: reflects the reason a run was just denied (server
+           is authoritative, so this can differ from the local status below). -->
+      <div class="status-banner" id="denied-banner"></div>
+
       {% if license_status and license_status.status == 'expired' %}
-      <div class="status-banner expired show">
+      <div class="status-banner expired show" data-fallback="1">
         Your license has expired{% if license_status.expires_at %} on
         <span class="mono">{{ license_status.expires_at }}</span>{% endif %}.
         Enter a renewed key below, or request a new one using the form at the bottom of this page.
       </div>
       {% elif license_status and license_status.status == 'revoked' %}
-      <div class="status-banner revoked show">
+      <div class="status-banner revoked show" data-fallback="1">
         This installation's license has been revoked. Request a new key using the form at the bottom of this page,
         or enter a replacement below.
       </div>
@@ -2204,7 +2220,40 @@ document.addEventListener('DOMContentLoaded', () => {
   input.focus();
   refreshLicenseBadge();
   setInterval(refreshLicenseBadge, 60000);
+  showDeniedBanner();
 });
+
+// Show a banner explaining why a scraping run was just denied. The reason is
+// stashed in sessionStorage by the main page before redirecting here. This is
+// authoritative (it came from the server), so it takes priority over the
+// locally-rendered status banner.
+function showDeniedBanner() {
+  let reason = '';
+  try { reason = sessionStorage.getItem('denied_reason') || ''; } catch (e) {}
+  if (!reason) return;
+  try { sessionStorage.removeItem('denied_reason'); } catch (e) {}
+
+  const MESSAGES = {
+    'key_not_found': "We couldn't find your license key on our system. Enter a valid key below, or request one using the form at the bottom of this page.",
+    'revoked':       "This license has been revoked. Enter a replacement key below, or contact us using the form at the bottom of this page.",
+    'expired':       "Your license has expired. Enter a renewed key below, or request a renewal using the form at the bottom of this page.",
+    'max_machines_reached': "This license is already active on the maximum number of machines. Contact us using the form at the bottom of this page to free up a slot.",
+    'no_license':    "No license is activated on this machine. Enter your key below, or request one using the form at the bottom of this page.",
+  };
+  const msg = MESSAGES[reason];
+  if (!msg) return;
+
+  // Hide the server-rendered fallback banner to avoid duplicates.
+  document.querySelectorAll('.status-banner[data-fallback]').forEach(el => {
+    el.classList.remove('show');
+  });
+
+  const banner = document.getElementById('denied-banner');
+  if (!banner) return;
+  banner.className = 'status-banner ' +
+    (reason === 'expired' ? 'expired' : 'revoked') + ' show';
+  banner.textContent = msg;
+}
 
 function showError(msg) {
   const box = document.getElementById('error-box');

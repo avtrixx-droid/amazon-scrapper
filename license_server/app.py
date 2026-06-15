@@ -383,8 +383,27 @@ def authorize_run():
         (key, machine_id),
     ).fetchone()
     if activation is None:
-        log.info("authorize-run: no activation key=%s machine=%s", key, machine_id[:12])
-        return jsonify({"ok": False, "reason": "revoked"}), 403
+        # No activation row for this machine. Self-heal IF under max_machines —
+        # this covers a valid key whose activation row was lost (DB reset/migration)
+        # or a client that only ever stored a license file. max_machines is still
+        # enforced, so piracy via a new machine is still blocked.
+        count = db.execute(
+            "SELECT COUNT(*) AS n FROM activations WHERE key = %s", (key,)
+        ).fetchone()["n"]
+        if count >= row["max_machines"]:
+            log.info("authorize-run: max_machines key=%s used=%d max=%d",
+                     key, count, row["max_machines"])
+            return jsonify({"ok": False, "reason": "max_machines_reached",
+                            "max_machines": row["max_machines"]}), 403
+        now = now_iso()
+        db.execute(
+            "INSERT INTO activations (key, machine_id, activated_at, "
+            "last_heartbeat, app_version) VALUES (%s, %s, %s, %s, %s)",
+            (key, machine_id, now, now, app_version),
+        )
+        db.commit()
+        log.info("authorize-run: auto-bound machine key=%s machine=%s",
+                 key, machine_id[:12])
 
     run_token = secrets.token_urlsafe(32)
     requested_at = now_iso()
@@ -515,6 +534,25 @@ def admin_revoke():
     db.commit()
     log.info("admin: revoked key=%s", key)
     return jsonify({"ok": True, "key": key, "revoked": True})
+
+
+@app.route("/admin/unrevoke", methods=["POST"])
+@require_admin
+def admin_unrevoke():
+    data = json_body()
+    key = (data.get("key") or "").strip().upper()
+    if not key:
+        return jsonify({"ok": False, "reason": "bad_request"}), 400
+
+    db = get_db()
+    row = db.execute("SELECT 1 FROM keys WHERE key = %s", (key,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "reason": "key_not_found"}), 404
+
+    db.execute("UPDATE keys SET revoked = 0 WHERE key = %s", (key,))
+    db.commit()
+    log.info("admin: unrevoked key=%s", key)
+    return jsonify({"ok": True, "key": key, "revoked": False})
 
 
 @app.route("/admin/release-machine", methods=["POST"])
