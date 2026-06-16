@@ -2239,8 +2239,41 @@ def extract_review_count(driver: Chrome, logger: logging.Logger) -> str:
     return m.group(1).replace(",", "")
 
 
+def _pick_deepest_bsr(text: str) -> Optional[str]:
+    """Pick the deepest (most specific) Best Sellers Rank node from a block of text.
+
+    Amazon always lists the broad category first, then progressively narrower
+    sub-categories, e.g.::
+
+        #2,100 in Electronics (See Top 100 in Electronics)
+        #50 in Mobile Portable Power Banks
+
+    The vendor wants the lower node — the narrowest sub-category (``#50 in
+    Mobile Portable Power Banks``), which is always the LAST ``#N in Category``
+    entry. The ``(See Top 100 ...)`` parenthetical is excluded because the
+    category capture stops at ``(``.
+
+    Selenium-free so the rule is unit-testable. Returns ``None`` if no rank.
+    """
+    matches = re.findall(r"#\s*([\d,]+)\s+in\s+([^\n(]{3,80})", text)
+    if matches:
+        rank, category = matches[-1]  # last = deepest / most specific node
+        rank = rank.replace(",", "")
+        category = re.sub(r"\s+", " ", category).strip().rstrip(".")
+        return f"#{rank} in {category}"
+    # Rank with no parseable category at all
+    m = re.search(r"#\s*([\d,]+)", text)
+    if m:
+        return f"#{m.group(1).replace(',', '')}"
+    return None
+
+
 def extract_bsr(driver: Chrome, logger: logging.Logger) -> str:
-    """Extract Best Sellers Rank (Product Ranking) from Amazon product page."""
+    """Extract Best Sellers Rank (Product Ranking) from Amazon product page.
+
+    Always returns the deepest (most specific) ranked node — see
+    ``_pick_deepest_bsr`` for why.
+    """
     bsr_selectors = [
         (By.CSS_SELECTOR, "#SalesRank"),
         (By.CSS_SELECTOR, "#productDetails_detailBullets_sections1"),
@@ -2254,31 +2287,36 @@ def extract_bsr(driver: Chrome, logger: logging.Logger) -> str:
             text = el.text or ""
             lower = text.lower()
             if "best seller" in lower or "best-seller" in lower or "#" in text:
-                m = re.search(r"#\s*([\d,]+)\s+in\s+([^\n(]{3,60})", text)
-                if m:
-                    rank = m.group(1).replace(",", "")
-                    category = re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".")
-                    logger.debug(f"BSR found via {sel}: #{rank} in {category}")
-                    return f"#{rank} in {category}"
-                m2 = re.search(r"#\s*([\d,]+)", text)
-                if m2:
-                    rank = m2.group(1).replace(",", "")
-                    logger.debug(f"BSR rank only via {sel}: #{rank}")
-                    return f"#{rank}"
+                # Prefer parsing the individual <li> nodes so each ranked
+                # category is isolated and the deepest one is unambiguous.
+                li_texts = [
+                    li.text for li in el.find_elements(By.CSS_SELECTOR, "li")
+                    if li.text and "#" in li.text
+                ]
+                result = _pick_deepest_bsr("\n".join(li_texts)) if li_texts else None
+                # Fall back to the whole element's text (detail-bullets format
+                # has no <li> per rank).
+                if not result:
+                    result = _pick_deepest_bsr(text)
+                if result:
+                    logger.debug(f"BSR (deepest node) via {sel}: {result}")
+                    return result
         except NoSuchElementException:
             continue
         except Exception:
             logger.debug(f"BSR extraction error for {sel}")
             continue
 
-    # Last resort: page source scan
+    # Last resort: page source scan. Collect every ranked node and keep the
+    # last (deepest) one, mirroring the DOM ordering.
     try:
         page = driver.page_source or ""
-        m = re.search(r"#\s*([\d,]+)\s+in\s+([^<\n]{3,60}?)(?:<|\n|&)", page)
-        if m:
-            rank = m.group(1).replace(",", "")
-            category = re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".")
-            logger.debug(f"BSR from page source: #{rank} in {category}")
+        matches = re.findall(r"#\s*([\d,]+)\s+in\s+([^<\n]{3,80}?)(?:<|\n|&)", page)
+        if matches:
+            rank, category = matches[-1]
+            rank = rank.replace(",", "")
+            category = re.sub(r"\s+", " ", category).strip().rstrip(".")
+            logger.debug(f"BSR from page source (deepest node): #{rank} in {category}")
             return f"#{rank} in {category}"
     except Exception:
         pass
