@@ -2325,15 +2325,28 @@ def extract_bsr(driver: Chrome, logger: logging.Logger) -> str:
     for by, sel in bsr_selectors:
         try:
             el = driver.find_element(by, sel)
-            text = el.text or ""
+            # Use textContent, not .text: in headless mode Selenium's .text
+            # returns "" for collapsed / not-visible detail sections, which is
+            # exactly when the deepest <li> (e.g. "#50 in Mobile Portable Power
+            # Banks", whose category sits inside an <a>) silently dropped out and
+            # we fell through to the top node. textContent is reliable regardless
+            # of visibility and includes link text.
+            try:
+                text = el.get_attribute("textContent") or el.text or ""
+            except Exception:
+                text = el.text or ""
             lower = text.lower()
             if "best seller" in lower or "best-seller" in lower or "#" in text:
                 # Prefer parsing the individual <li> nodes so each ranked
                 # category is isolated and the deepest one is unambiguous.
-                li_texts = [
-                    li.text for li in el.find_elements(By.CSS_SELECTOR, "li")
-                    if li.text and "#" in li.text
-                ]
+                li_texts = []
+                for li in el.find_elements(By.CSS_SELECTOR, "li"):
+                    try:
+                        t = (li.get_attribute("textContent") or li.text or "").strip()
+                    except Exception:
+                        t = (li.text or "").strip()
+                    if "#" in t:
+                        li_texts.append(t)
                 result = _pick_deepest_bsr("\n".join(li_texts)) if li_texts else None
                 # Fall back to the whole element's text (detail-bullets format
                 # has no <li> per rank).
@@ -2349,10 +2362,17 @@ def extract_bsr(driver: Chrome, logger: logging.Logger) -> str:
             continue
 
     # Last resort: page source scan. Collect every ranked node and keep the
-    # last (deepest) one, mirroring the DOM ordering.
+    # last (deepest) one, mirroring the DOM ordering. The category may be wrapped
+    # in an <a> link (the deeper sub-category usually is), so allow an optional
+    # opening tag and stop the category at </a>, '<', newline, '&' or '(' — the
+    # old regex only matched plain-text categories, so the linked deepest node
+    # never matched and the broad top node won.
     try:
         page = driver.page_source or ""
-        matches = re.findall(r"#\s*([\d,]+)\s+in\s+([^<\n]{3,80}?)(?:<|\n|&)", page)
+        matches = re.findall(
+            r"#\s*([\d,]+)\s+in\s+(?:<a[^>]*>)?\s*([^<\n(]{3,80}?)\s*(?:</a>|<|\n|&|\()",
+            page,
+        )
         if matches:
             rank, category = matches[-1]
             rank = rank.replace(",", "")
@@ -2762,28 +2782,32 @@ def scrape_with_smart_retry(
 FIXED_HEADERS = [
     "Category",            # A
     "Item Name",           # B
-    "Lapcare Item Code",   # C
-    "ASIN Link",           # D
-    "Current Price (₹)",   # E
-    "MRP (₹)",             # F
-    "Discount (%)",        # G
-    "Product Ranking",     # H
-    "Availability",        # I — overall availability across pincodes
-    "Rating",              # J
-    "Reviews",             # K
-    "Seller",              # L
-    "Earliest Delivery",   # M — fastest delivery across all pincodes
-    "Free Delivery",       # N — Yes/No on the earliest option
+    "ASIN Link",           # C
+    "Current Price (₹)",   # D
+    "MRP (₹)",             # E
+    "Discount (%)",        # F
+    "Product Ranking",     # G
+    "Availability",        # H — overall availability across pincodes
+    "Rating",              # I
+    "Reviews",             # J
+    "Seller",              # K
+    "Earliest Delivery",   # L — fastest delivery across all pincodes
+    "Free Delivery",       # M — Yes/No on the earliest option
     "Scraped At",          # before the per-pincode block
 ]
 
 # Column index (1-based) of the ASIN Link in FIXED_HEADERS
-_ASIN_LINK_COL = 4
+_ASIN_LINK_COL = 3
 
 
 def get_desktop_path() -> Path:
     home = Path.home()
     return home / "Desktop"
+
+
+def get_downloads_path() -> Path:
+    home = Path.home()
+    return home / "Downloads"
 
 
 def resolve_output_path(settings: Dict[str, object], timestamp: Optional[str] = None) -> Path:
@@ -2795,6 +2819,8 @@ def resolve_output_path(settings: Dict[str, object], timestamp: Optional[str] = 
     folder_raw = str(settings["OUTPUT_FOLDER"]).strip()
     if folder_raw.lower() == "desktop":
         folder = get_desktop_path()
+    elif folder_raw.lower() in ("downloads", "download"):
+        folder = get_downloads_path()
     else:
         folder = Path(folder_raw).expanduser()
         if not folder.is_absolute():
@@ -2972,7 +2998,6 @@ def build_pivoted_excel(
         row = [
             entry.category or "",
             display_name,
-            entry.lapcare_code or "",
             product_url,           # ASIN Link — will be made clickable below
             price_val,
             mrp_val,

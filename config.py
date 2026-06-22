@@ -17,8 +17,8 @@ PINCODES = {
 
 # ---- OUTPUT SETTINGS ----
 # Where to save the Excel file
-# Default: saves to Desktop
-OUTPUT_FOLDER = "Desktop"
+# Default: saves to Downloads
+OUTPUT_FOLDER = "Downloads"
 
 # What to name the output file
 # {date} is replaced with the date and time of the run (e.g. 13May2026_143022)

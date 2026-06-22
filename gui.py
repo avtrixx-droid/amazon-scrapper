@@ -130,7 +130,7 @@ def _default_settings():
         "HEADLESS": HEADLESS,
         "SEND_EMAIL": False, "EMAIL_FROM": "", "EMAIL_PASSWORD": "",
         "EMAIL_TO": "", "EMAIL_SUBJECT": "",
-        "OUTPUT_FOLDER": "Desktop",
+        "OUTPUT_FOLDER": "Downloads",
         "OUTPUT_FILENAME": "Amazon_Report_{date}.xlsx",
     }
 
@@ -473,7 +473,7 @@ def _build_excel():
             xlsx_path = Path(_st["xlsx_path"])
         else:
             xlsx_path = sc.resolve_output_path({
-                "OUTPUT_FOLDER": "Desktop",
+                "OUTPUT_FOLDER": "Downloads",
                 "OUTPUT_FILENAME": "Amazon_Report_{date}.xlsx",
             })
         started = _st["start_time"] or datetime.now()
