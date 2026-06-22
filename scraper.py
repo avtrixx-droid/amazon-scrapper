@@ -744,6 +744,47 @@ def detect_captcha(driver: Chrome) -> bool:
     return False
 
 
+# Substrings that identify a soft anti-bot block / throttle page. These pages
+# are NOT formal CAPTCHAs (no #captchacharacters, no /errors/validateCaptcha
+# URL) — Amazon serves them with a 503 when it rate-limits a session. Without
+# this probe they look like an ordinary INCOMPLETE_LOAD and get retried against
+# the same (now-flagged) session, which is what makes failures cascade on long
+# runs. Treat them like a CAPTCHA: cool down + rotate to a fresh driver.
+_BLOCK_INDICATORS = (
+    "something went wrong on our end",
+    "to discuss automated access",
+    "automated access to amazon data",
+    "api-services-support@amazon.com",
+    "sorry, we just need to make sure you're not a robot",
+    "enter the characters you see below",
+    "type the characters you see in this image",
+    "request could not be completed",
+    "we're sorry, but something went wrong",
+)
+
+
+def detect_block(driver: Chrome) -> bool:
+    """Detect a soft anti-bot block / throttle page that is not a formal CAPTCHA.
+
+    Only call this on the *suspicious* path (after the page failed product
+    validation) — it reads a bounded slice of ``document.body.innerText`` which,
+    while cheap on the tiny block page, we don't want on every healthy scrape.
+    """
+    try:
+        title = (driver.title or "").lower()
+        if title.startswith("sorry") or "robot check" in title or "503" in title:
+            return True
+        try:
+            body_txt = (driver.execute_script(
+                "return (document.body && document.body.innerText || '').slice(0, 3000);"
+            ) or "").lower()
+        except Exception:
+            body_txt = ""
+        return any(ind in body_txt for ind in _BLOCK_INDICATORS)
+    except Exception:
+        return False
+
+
 def pause_for_captcha(
     driver: Chrome,
     logger: logging.Logger,
@@ -2579,6 +2620,20 @@ def scrape_one(driver: Chrome, asin: str, pincode: str, city: str, logger: loggi
             product_url=url, scraped_at=scraped_at, status="FAILED",
             failure_reason="Product not found (404)",
         )
+    # A page that didn't load as a product is the moment to check for a soft
+    # block / throttle page (503 "Sorry…", "automated access"). These carry no
+    # captcha element, so without this they'd be miscounted as ordinary failures
+    # and retried on the same flagged session — the root of the cascade on big
+    # runs. Surface them as BLOCKED so the caller can cool down + rotate driver.
+    if page_state in ("INCOMPLETE_LOAD", "WRONG_PAGE") and detect_block(driver):
+        return ScrapeResult(
+            asin=asin, product_name="", mrp=None, price=None,
+            discount_percent="", pincode=pincode, city=city,
+            in_stock="", delivery_date="", free_delivery="",
+            seller="", rating="", reviews="", bsr="",
+            product_url=url, scraped_at=scraped_at, status="FAILED",
+            failure_reason="BLOCKED",
+        )
 
     product_name = extract_product_name(driver, logger)
     mrp = extract_mrp(driver, logger)
@@ -2640,7 +2695,7 @@ def scrape_with_smart_retry(
         return d
 
     res = scrape_one(driver, asin, pincode, city, logger)
-    if res.failure_reason == "CAPTCHA":
+    if res.failure_reason in ("CAPTCHA", "BLOCKED"):
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
         driver = _after_captcha(driver)
         res = scrape_one(driver, asin, pincode, city, logger)
@@ -2661,7 +2716,7 @@ def scrape_with_smart_retry(
     except Exception:
         pass
     res2 = scrape_one(driver, asin, pincode, city, logger)
-    if res2.failure_reason == "CAPTCHA":
+    if res2.failure_reason in ("CAPTCHA", "BLOCKED"):
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
         driver = _after_captcha(driver)
         res2 = scrape_one(driver, asin, pincode, city, logger)
@@ -2681,7 +2736,7 @@ def scrape_with_smart_retry(
     except Exception:
         pass
     res3 = scrape_one(driver, asin, pincode, city, logger)
-    if res3.failure_reason == "CAPTCHA":
+    if res3.failure_reason in ("CAPTCHA", "BLOCKED"):
         pause_for_captcha(driver, logger, progress_dir, idx_display, completed_list)
         driver = _after_captcha(driver)
         res3 = scrape_one(driver, asin, pincode, city, logger)
@@ -3211,6 +3266,23 @@ def run_worker(
     done = 0
     driver = None
 
+    # --- Anti-block circuit breaker state (persists across pincodes) ---
+    # When Amazon starts throttling a session, every subsequent request fails.
+    # We count consecutive failures; once they cross a threshold we cool down and
+    # rotate to a fresh driver (new UA + cookies) instead of hammering the flagged
+    # session. This is what stops failures from cascading on 100s of combinations.
+    CIRCUIT_BREAK_THRESHOLD = 4
+    consecutive_failures = 0
+    breaker_trips = 0
+
+    def _adaptive_sleep() -> None:
+        # Base human delay, scaled up the more we've been failing recently, so a
+        # struggling session backs off instead of pounding Amazon at full pace.
+        base_min = float(settings["MIN_DELAY"])
+        base_max = float(settings["MAX_DELAY"])
+        scale = 1.0 + min(consecutive_failures, 5) * 0.6  # up to ~4x slower
+        time.sleep(random.uniform(base_min * scale, base_max * scale))
+
     try:
         driver = build_driver(bool(settings["HEADLESS"]), logger, base_dir, worker_id=worker_id)
         open_homepage(driver, logger)
@@ -3249,19 +3321,23 @@ def run_worker(
 
             for entry in asin_entries:
                 done += 1
-                time.sleep(random.uniform(float(settings["MIN_DELAY"]), float(settings["MAX_DELAY"])))
+                _adaptive_sleep()
                 try:
                     res = scrape_one(driver, entry.asin, pincode, city, logger)
-                    if res.failure_reason == "CAPTCHA":
+                    # CAPTCHA and soft-block (503 / "automated access") are handled
+                    # the same way: pause, then rotate to a fresh driver. Reusing
+                    # the flagged session here is what made failures cascade.
+                    if res.failure_reason in ("CAPTCHA", "BLOCKED"):
+                        label = "CAPTCHA" if res.failure_reason == "CAPTCHA" else "rate-limit"
                         qput({"type": "progress", "worker": worker_id, "done": done,
-                              "total": total_combos, "status": "CAPTCHA",
-                              "msg": f"⚠️  W{worker_id} CAPTCHA detected — pausing up to 5 min"})
+                              "total": total_combos, "status": res.failure_reason,
+                              "msg": f"⚠️  W{worker_id} {label} detected — pausing & refreshing browser"})
                         # Polls + emits countdown ticks to the GUI via msg_queue
                         # so the worker doesn't look frozen.
                         pause_for_captcha(
                             driver, logger, worker_dir, done, [], msg_queue=msg_queue
                         )
-                        # CLAUDE.md: do NOT reuse a stale driver after CAPTCHA pause
+                        # CLAUDE.md: do NOT reuse a stale driver after a block/CAPTCHA
                         driver = _recycle_driver(
                             driver, settings, logger, base_dir, worker_id=worker_id
                         )
@@ -3270,10 +3346,20 @@ def run_worker(
                         res = scrape_one(driver, entry.asin, pincode, city, logger)
                     if res.status != "OK":
                         time.sleep(random.uniform(5, 15))
-                        try:
-                            driver.refresh()
-                        except Exception:
-                            pass
+                        # If the retry is against a session that's already been
+                        # blocked, refreshing won't help — rotate the driver.
+                        # Otherwise a cheap refresh handles transient hiccups.
+                        if res.failure_reason in ("CAPTCHA", "BLOCKED"):
+                            driver = _recycle_driver(
+                                driver, settings, logger, base_dir, worker_id=worker_id
+                            )
+                            if set_pincode(driver, pincode, city, logger):
+                                wait_for_pincode_confirmation(driver, pincode)
+                        else:
+                            try:
+                                driver.refresh()
+                            except Exception:
+                                pass
                         res = scrape_one(driver, entry.asin, pincode, city, logger)
 
                     # Periodic browser recycle + crash recovery, AFTER the scrape.
@@ -3302,6 +3388,30 @@ def run_worker(
                 if res.status != "OK":
                     failed_rows.append([entry.asin, pincode, city,
                                         res.failure_reason or "Failed", res.scraped_at])
+
+                # --- Circuit breaker: break a failure cascade before it eats the run ---
+                if res.status == "OK":
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= CIRCUIT_BREAK_THRESHOLD:
+                        breaker_trips += 1
+                        cool = min(90 * breaker_trips, 600)  # escalating, capped at 10 min
+                        qput({"type": "progress", "worker": worker_id, "done": done,
+                              "total": total_combos, "status": "COOLDOWN",
+                              "msg": (f"🧊 W{worker_id} {consecutive_failures} failures in a row — "
+                                      f"cooling down {cool}s & rotating browser to avoid a block")})
+                        logger.warning(
+                            "Circuit breaker tripped (worker %s): %d consecutive failures; "
+                            "cooling %ds and recycling driver", worker_id, consecutive_failures, cool
+                        )
+                        time.sleep(cool)
+                        driver = _recycle_driver(
+                            driver, settings, logger, base_dir, worker_id=worker_id
+                        )
+                        if set_pincode(driver, pincode, city, logger):
+                            wait_for_pincode_confirmation(driver, pincode)
+                        consecutive_failures = 0  # give the fresh session a clean slate
 
                 icon = "✅" if res.status == "OK" else "❌"
                 price_str = f"₹{int(res.price)}" if res.price else "NA"
