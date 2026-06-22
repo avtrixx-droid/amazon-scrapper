@@ -242,7 +242,7 @@ def validate_config() -> Dict[str, object]:
         print("Email is enabled but not fully set up. Email will be skipped for this run.")
         send_email = False
 
-    output_folder = str(getattr(config, "OUTPUT_FOLDER", "Desktop")).strip() or "Desktop"
+    output_folder = str(getattr(config, "OUTPUT_FOLDER", "Downloads")).strip() or "Downloads"
     output_filename = str(getattr(config, "OUTPUT_FILENAME", "Amazon_Report_{date}.xlsx")).strip()
 
     return {
