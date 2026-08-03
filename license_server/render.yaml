@@ -1,17 +1,17 @@
-# Render Blueprint: license server (Flask) + managed Postgres (free tier).
+# Render Blueprint: license server (Flask) only. Database is Supabase Postgres
+# (external), not a Render-managed database.
 #
 # rootDir points at license_server/ so Render reads THIS folder's
 # requirements.txt and runs gunicorn from here, not the project root.
 #
-# Postgres replaces the earlier SQLite-on-ephemeral-/tmp setup. Postgres on
-# Render's free tier is persistent (1 GB included) — keys survive deploys and
-# container restarts. DATABASE_URL is injected automatically via `fromDatabase`.
-databases:
-  - name: amazon-scraper-license-db
-    plan: free
-    databaseName: licenses
-    user: licenses_app
-
+# DATABASE_URL is NOT auto-injected here (no `fromDatabase` — that only works
+# for Render-managed databases). Set it manually in the Render dashboard:
+# Service → Environment → DATABASE_URL = the Supabase "Session pooler"
+# connection string (Project Settings → Database → Connection string →
+# Session pooler tab), with the real password substituted for
+# [YOUR-PASSWORD]. Do NOT use the direct db.<ref>.supabase.co host — it's
+# IPv6-only and unreachable from Render's free web services. Never commit
+# the resolved value here.
 services:
   - type: web
     name: amazon-scraper-license
@@ -29,6 +29,4 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: DATABASE_URL
-        fromDatabase:
-          name: amazon-scraper-license-db
-          property: connectionString
+        sync: false

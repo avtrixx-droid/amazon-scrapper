@@ -1,15 +1,26 @@
 # AmazonScraper License Server
 
-Tiny Flask + SQLite service that issues, activates, and validates license keys
-for the AmazonScraper desktop app. Designed for Render's free tier.
+Tiny Flask + PostgreSQL service that issues, activates, and validates license keys
+for the AmazonScraper desktop app. Web service runs on Render's free tier;
+the database is Supabase Postgres (external, not Render-managed).
 
 ## Local dev
 
 ```bash
 cd license_server
 pip install -r requirements.txt
-LICENSE_SIGNING_SECRET=dev LICENSE_ADMIN_TOKEN=dev python app.py
+LICENSE_SIGNING_SECRET=dev LICENSE_ADMIN_TOKEN=dev \
+  DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres \
+  python app.py
 ```
+
+**Use the pooler connection string, not the direct one.** Supabase's direct
+host (`db.<project-ref>.supabase.co`) is IPv6-only unless you pay for the
+IPv4 add-on, and Render's free web services don't reliably support outbound
+IPv6 — a direct-host `DATABASE_URL` will silently fail to connect once
+deployed. Get the pooler string from Supabase → **Project Settings →
+Database → Connection string → "Session pooler"** tab (dual-stack, works
+from Render).
 
 Health check:
 
@@ -18,24 +29,31 @@ curl http://localhost:8000/healthz
 # → {"ok": true, "time": "..."}
 ```
 
-DB defaults to `./licenses.db` (auto-created on first run). Override with
-`LICENSE_DB_PATH=/some/where/licenses.db`.
+Tables (`keys`, `activations`, `runs`) are created automatically on first
+connect via `CREATE TABLE IF NOT EXISTS` in `app.py` — no separate migration
+step needed against a fresh Supabase database.
 
-## Deploy to Render
+## Deploy to Render (web service) + Supabase (database)
 
-1. Push this repo to GitHub.
-2. In Render: **New +** → **Blueprint** → connect the repo → pick
+1. Create a Supabase project → **Project Settings → Database → Connection
+   string → "Session pooler"** tab (not "URI"/direct — that host is
+   IPv6-only and Render's free web services can't reliably reach it) →
+   copy it and substitute the real database password for `[YOUR-PASSWORD]`.
+2. Push this repo to GitHub.
+3. In Render: **New +** → **Blueprint** → connect the repo → pick
    `license_server/render.yaml`.
-3. Render will:
+4. Render will:
    - provision a free web service
-   - attach a 1 GB persistent disk at `/var/data` (SQLite lives there so it
-     survives deploys)
    - auto-generate `LICENSE_SIGNING_SECRET` and `LICENSE_ADMIN_TOKEN`
    - run `gunicorn app:app` and start hitting `/healthz`
-4. Note the deployed URL (e.g. `https://amazon-scraper-license.onrender.com`).
-5. **Important:** edit `license.py` in the desktop project and set
+5. `DATABASE_URL` is **not** auto-populated (Blueprint has no managed
+   database anymore). In the Render dashboard: Service → Environment →
+   add `DATABASE_URL` = the Supabase connection string from step 1. Never
+   commit this value to the repo.
+6. Note the deployed URL (e.g. `https://amazon-scraper-license.onrender.com`).
+7. **Important:** edit `license.py` in the desktop project and set
    `LICENSE_SERVER_URL` to that URL before building the next release.
-6. Set the **same** `LICENSE_SIGNING_SECRET` as `AMZ_LICENSE_SECRET` in the
+8. Set the **same** `LICENSE_SIGNING_SECRET` as `AMZ_LICENSE_SECRET` in the
    build environment before running PyInstaller — the client needs it to
    verify signed tokens offline.
 

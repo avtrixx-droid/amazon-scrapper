@@ -52,7 +52,7 @@ AmazonScraper/
 │   ├── app.py                    ← server: /activate, /heartbeat, /authorize-run, /admin/*, /healthz
 │   ├── issue_key.py              ← admin CLI: issue/list/extend/revoke/release-machine
 │   ├── requirements.txt          ← server-side deps (flask, itsdangerous, gunicorn, requests)
-│   ├── render.yaml               ← one-click Render Blueprint
+│   ├── render.yaml               ← one-click Render Blueprint (web service only; DB is Supabase)
 │   └── README.md                 ← deploy + usage guide
 ├── logs/                         ← auto-created; scraper_YYYYMMDD_HHMMSS.log per run
 ├── output/                       ← timestamped Excel files: AmazonReport_YYYYMMDD_HHMMSS.xlsx
@@ -740,8 +740,10 @@ control is **`revoke`** (kills the whole key); `unrevoke` re-enables it.
 
 ### Where keys live
 
-- **Server-side database** (PostgreSQL on Render): `keys`, `activations`,
-  and `runs` tables. The `runs` table logs every run authorization request.
+- **Server-side database** (PostgreSQL on Supabase; Flask app runs on
+  Render): `keys`, `activations`, and `runs` tables. The `runs` table logs
+  every run authorization request. `DATABASE_URL` is set manually in the
+  Render dashboard (not auto-injected — see `license_server/render.yaml`).
 - **Client-side state** (`license.json`): key, machine_id, customer,
   expires_at, last_check, last_authorized_at.
 
@@ -794,6 +796,7 @@ grace and 35-second request timeout handle cold starts transparently.
 | **Amazon Now / Quick Commerce promise overlooked on accordion buy-box** | (a) Duration regex matched only "minute"/"hour" so "30 mins"/"2 hrs" dropped silently. (b) Container list missed `#mbc`, `#newAccordionRow_*`, `#qcomBuyBoxRow_feature_div`, `#almOfferDisplay_feature_div` — Amazon's new multi-offer buy box. (c) `wait_for_delivery_block` returned on the first populated channel, so the scraper read the page-source snapshot before Amazon Now hydrated. (d) `_MONTHS` only had 3-letter prefixes so "June 2" failed. (e) "Today" resolved to today-noon (in the past after lunch), wrongly beating same-day "10 minutes" candidates. | (a) Duration regex now allows `mins?`/`hrs?`. (b) Container list extended. (c) Wait now blocks until fast-channel containers populate when present; page-source scan no longer capped at 200 KB; added `document.body.innerText` fallback. (d) Full month names added to `_MONTHS` and `_MONTH_PAT`. (e) "Today" resolves to today-at-20:00. New pure helper `extract_earliest_delivery_from_text` lets the priority rules be unit-tested (`tests/test_delivery_parser.py`, 42 cases). |
 | **Failures grow with run size (cascade past ~100–200 combos)** | Once Amazon rate-limits a long-lived session/IP it serves soft-block pages (503 "Sorry…", "automated access") that carry NO captcha element. `detect_captcha`/`validate_page_is_product` only caught formal CAPTCHAs, so these were miscounted as `INCOMPLETE_LOAD` failures and retried against the *same flagged session* (`driver.refresh()` only) — so every remaining combo failed too. No circuit breaker, flat delay, up to 4 workers per IP. | New `detect_block(driver)` recognises soft-block/throttle pages on the suspicious path (post-validation) and returns `failure_reason="BLOCKED"`. `run_worker` now treats `BLOCKED` like `CAPTCHA` (pause + `_recycle_driver` to a fresh UA/cookies + re-set pincode), retries block-related failures by **rotating the driver** instead of refreshing, runs an **adaptive delay** that scales up with consecutive failures, and a **circuit breaker**: ≥4 consecutive failures → escalating cooldown (90s×trips, capped 10 min) + driver rotation + pincode re-set. `scrape_with_smart_retry` (CLI path) treats `BLOCKED` like `CAPTCHA` too. Block detection lives in `scrape_one`, so both paths benefit. |
 | **Anyone with the .exe could use it indefinitely** | No license gate — the build was distributed as a free-running .exe with no activation, no expiry, no kill switch. | Built `license_server/` (Flask + SQLite on Render): `/activate` binds key↔machine_id, `/heartbeat` re-validates weekly, admin CLI in `issue_key.py`. New client module `license.py` stores signed token in user's app-data dir, verifies offline via itsdangerous, 14-day grace if the server is unreachable. `gui.py` gate redirects to `/activate` before any worker spawns; new `/license-status` endpoint exposes status JSON. PyInstaller spec adds `license`, `winreg`, `itsdangerous.*` to `hiddenimports` and requires `AMZ_LICENSE_SECRET` in the build env. |
+| **Render's free Postgres suspended (90-day expiry), risking license data loss** | Render's free-tier managed Postgres (`amazon-scraper-license-db`) expires after 90 days with no built-in recovery on the free plan. | Migrated the database to Supabase Postgres (external, always-on free tier); `license_server/` Flask app still runs on Render. No app code change needed — `app.py` already talks to Postgres generically via `psycopg2.connect(DATABASE_URL)` and auto-creates its tables (`CREATE TABLE IF NOT EXISTS`). Removed the `databases:` block from `render.yaml` (no more `fromDatabase` auto-injection); `DATABASE_URL` is now `sync: false` and must be set manually in the Render dashboard to the Supabase connection string. |
 
 ---
 
