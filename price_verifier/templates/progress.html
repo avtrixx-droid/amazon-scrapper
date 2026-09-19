@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Run in progress</h2>
+<p class="muted">Run ID: {{ run_id }}</p>
+
+<div>
+  <progress id="bar" value="0" max="1"></progress>
+  <p id="count">0 / 0</p>
+</div>
+
+<div class="stat-row">
+  <div class="stat matched"><div class="n" id="matched">0</div><div class="muted">Matched</div></div>
+  <div class="stat mismatched"><div class="n" id="mismatched">0</div><div class="muted">Mismatched</div></div>
+  <div class="stat oos"><div class="n" id="oos">0</div><div class="muted">Out of Stock</div></div>
+  <div class="stat failed"><div class="n" id="failed">0</div><div class="muted">Failed</div></div>
+</div>
+
+<p class="muted">Elapsed: <span id="elapsed">0s</span> &nbsp;|&nbsp; ETA: <span id="eta">—</span></p>
+<p id="status-line" class="muted"></p>
+
+<script>
+const runId = {{ run_id | tojson }};
+const evtSource = new EventSource(`/stream/${runId}`);
+function fmt(s) {
+  if (s === null || s === undefined) return "—";
+  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+evtSource.onmessage = function(e) {
+  const d = JSON.parse(e.data);
+  document.getElementById("bar").value = d.done;
+  document.getElementById("bar").max = d.total || 1;
+  document.getElementById("count").textContent = `${d.done} / ${d.total}`;
+  document.getElementById("matched").textContent = d.matched;
+  document.getElementById("mismatched").textContent = d.mismatched;
+  document.getElementById("oos").textContent = d.out_of_stock;
+  document.getElementById("failed").textContent = d.failed;
+  document.getElementById("elapsed").textContent = fmt(d.elapsed_seconds);
+  document.getElementById("eta").textContent = fmt(d.eta_seconds);
+  if (d.status !== "running") {
+    document.getElementById("status-line").textContent =
+      d.status === "completed" ? "Run complete." : `Run ended: ${d.status}`;
+    evtSource.close();
+    if (d.status === "completed") {
+      window.location.href = `/results/${runId}`;
+    }
+  }
+};
+evtSource.onerror = function() {
+  document.getElementById("status-line").textContent = "Connection to progress stream lost — the run may still be going. Refresh to check.";
+};
+</script>
+{% endblock %}

@@ -57,11 +57,29 @@ AmazonScraper/
 ├── logs/                         ← auto-created; scraper_YYYYMMDD_HHMMSS.log per run
 ├── output/                       ← timestamped Excel files: AmazonReport_YYYYMMDD_HHMMSS.xlsx
 ├── progress/                     ← progress.json for resume state
-└── .scraper.lock                 ← PID lock file (auto-created/deleted; never commit)
+├── .scraper.lock                 ← PID lock file (auto-created/deleted; never commit)
+└── price_verifier/               ← SEPARATE tool: Amazon Price Verification Tool — see below
 ```
 
 **Never add top-level files without updating this section.**
 **Never commit `.scraper.lock` — add it to `.gitignore`.**
+
+### `price_verifier/` — a second, independent tool in this repo
+
+This is a different product (price-vs-expected-price verification, batch
+CSV/XLSX upload, SQLite run history) with a deliberately different
+architecture (async plain-HTTP pipeline, not Selenium-per-row), built to
+hit a 10-30 minute / 2,000-ASIN target that the Selenium/multiprocessing
+model above cannot reach. **Everything in this file above and below —
+"Do not switch to regular selenium or playwright," multiprocessing-only
+concurrency, the pincode-batching DOM-click loop, the Excel schema, the
+license system — governs `scraper.py`/`gui.py` only and does NOT apply to
+`price_verifier/`.** It has its own README at `price_verifier/README.md`
+with its own architecture notes, its own `requirements.txt`, and its own
+`tests/`. Do not edit `price_verifier/` code using rules from this file;
+read its README first. As of this writing it is implemented and
+offline-tested but **not yet validated against live Amazon** — see that
+README's "Known gaps" section before treating its output as trustworthy.
 
 ---
 

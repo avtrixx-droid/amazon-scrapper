@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Confirm run — {{ filename }}</h2>
+
+<div class="stat-row">
+  <div class="stat"><div class="n">{{ total_rows }}</div><div class="muted">rows parsed</div></div>
+  <div class="stat matched"><div class="n">{{ valid_rows }}</div><div class="muted">valid</div></div>
+  <div class="stat failed"><div class="n">{{ invalid_rows|length }}</div><div class="muted">invalid (skipped)</div></div>
+</div>
+
+{% if invalid_rows %}
+<p class="muted">Invalid rows will not be scraped. Fix and re-upload if these matter:</p>
+<table>
+  <tr><th>Row</th><th>ASIN</th><th>Reason</th></tr>
+  {% for r in invalid_rows[:25] %}
+  <tr><td>{{ r.row_number }}</td><td>{{ r.asin }}</td><td>{{ r.reason }}</td></tr>
+  {% endfor %}
+</table>
+{% if invalid_rows|length > 25 %}<p class="muted">...and {{ invalid_rows|length - 25 }} more.</p>{% endif %}
+{% endif %}
+
+<form method="post" action="{{ url_for('start') }}">
+  <input type="hidden" name="upload_id" value="{{ upload_id }}">
+
+  <label for="pincode">Delivery pincode (applied once for the whole batch)</label>
+  <input type="text" id="pincode" name="pincode" placeholder="e.g. 110001" required>
+
+  <div class="row">
+    <div>
+      <label for="price_source">Price source</label>
+      <select id="price_source" name="price_source">
+        <option value="buybox" {% if price_source == 'buybox' %}selected{% endif %}>Buy Box price</option>
+        <option value="lowest" {% if price_source == 'lowest' %}selected{% endif %} disabled>Lowest across sellers (not yet implemented)</option>
+      </select>
+    </div>
+    <div>
+      <label for="concurrency">Concurrent requests</label>
+      <input type="number" id="concurrency" name="concurrency" min="1" max="40" value="{{ default_concurrency }}">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="tolerance_abs">Tolerance — absolute (₹)</label>
+      <input type="number" step="0.01" id="tolerance_abs" name="tolerance_abs" value="{{ default_tolerance_abs }}">
+    </div>
+    <div>
+      <label for="tolerance_pct">Tolerance — percent (%)</label>
+      <input type="number" step="0.01" id="tolerance_pct" name="tolerance_pct" value="{{ default_tolerance_pct }}">
+    </div>
+  </div>
+
+  <button type="submit" {% if valid_rows == 0 %}disabled{% endif %}>Start run ({{ valid_rows }} ASINs)</button>
+</form>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Run history</h2>
+
+{% if not runs %}
+<p class="muted">No runs yet.</p>
+{% else %}
+<table>
+  <tr>
+    <th>Run ID</th><th>Started</th><th>Status</th><th>Pincode</th><th>Total</th>
+    <th>Matched</th><th>Mismatched</th><th>OOS</th><th>Failed</th><th></th>
+  </tr>
+  {% for r in runs %}
+  <tr>
+    <td>{{ r.run_id }}</td>
+    <td>{{ r.started_at }}</td>
+    <td>{{ r.status }}</td>
+    <td>{{ r.pincode }}</td>
+    <td>{{ r.total_rows }}</td>
+    <td>{{ r.matched }}</td>
+    <td>{{ r.mismatched }}</td>
+    <td>{{ r.out_of_stock }}</td>
+    <td>{{ r.failed }}</td>
+    <td>
+      {% if r.status == 'completed' %}
+      <a href="{{ url_for('download', run_id=r.run_id) }}">Download</a>
+      {% elif r.status == 'running' %}
+      <a href="{{ url_for('progress_view', run_id=r.run_id) }}">View progress</a>
+      {% else %}
+      <form method="post" action="{{ url_for('resume', run_id=r.run_id) }}" style="display:inline">
+        <button type="submit" style="margin:0;padding:4px 10px;font-size:12px;">Resume</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

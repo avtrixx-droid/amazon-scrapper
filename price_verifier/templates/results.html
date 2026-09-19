@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Run complete</h2>
+<p class="muted">Run ID: {{ run.run_id }} &nbsp;|&nbsp; Pincode: {{ run.pincode }} &nbsp;|&nbsp; File: {{ run.input_filename }}</p>
+
+<div class="stat-row">
+  <div class="stat"><div class="n">{{ run.total_rows }}</div><div class="muted">Total</div></div>
+  <div class="stat matched"><div class="n">{{ run.matched }}</div><div class="muted">Matched</div></div>
+  <div class="stat mismatched"><div class="n">{{ run.mismatched }}</div><div class="muted">Mismatched</div></div>
+  <div class="stat oos"><div class="n">{{ run.out_of_stock }}</div><div class="muted">Out of Stock</div></div>
+  <div class="stat failed"><div class="n">{{ run.failed }}</div><div class="muted">Failed</div></div>
+</div>
+
+<a class="btn" href="{{ url_for('download', run_id=run.run_id) }}">Download workbook (.xlsx)</a>
+<a class="btn btn-secondary" href="{{ url_for('index') }}">Start another run</a>
+{% endblock %}
