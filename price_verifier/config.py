@@ -5,17 +5,38 @@ Unlike the delivery-scraper's config.py (vendor-edited, CLI-only), these are
 exposed as run-time settings in the upload form; this module only holds the
 defaults those form fields fall back to, plus fixed system limits.
 
-The three values marked "PENDING CONFIRMATION" are best-guess defaults from
-the build spec's open questions (see CLAUDE_PRICE_VERIFIER.md). They are
-config, not hardcoded logic, specifically so they can change without a
-code edit once the team confirms the real answer.
+The values marked "PENDING CONFIRMATION" are best-guess defaults from the
+build spec's open questions (see README.md). They are config, not hardcoded
+logic, specifically so they can change without a code edit once the team
+confirms the real answer.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+
+def _get_base_dir() -> Path:
+    """Where the SQLite DB, uploads, and Excel output live.
+
+    Mirrors gui.py's _get_base_dir(): under a normal `python -m
+    price_verifier.app` run this is the package directory, but once
+    PyInstaller freezes this into a Windows .exe (see
+    price_verifier_windows.spec), `Path(__file__).parent` resolves inside
+    the bundle — read-only in spirit, and for a onefile build literally a
+    temp directory that's wiped after every run. Data would either fail to
+    write or vanish between runs. When frozen, use the folder that holds
+    the .exe instead — writable, and it's what the vendor already expects
+    ("the app remembers my run history") since that's how the root
+    scraper.py/gui.py app already behaves.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = _get_base_dir()
 DB_PATH = BASE_DIR / "data" / "price_verifier.db"
 OUTPUT_DIR = BASE_DIR / "data" / "output"
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"

@@ -58,6 +58,8 @@ AmazonScraper/
 ├── output/                       ← timestamped Excel files: AmazonReport_YYYYMMDD_HHMMSS.xlsx
 ├── progress/                     ← progress.json for resume state
 ├── .scraper.lock                 ← PID lock file (auto-created/deleted; never commit)
+├── price_verifier_windows.spec   ← PyInstaller spec for price_verifier/ (Windows only) — see below
+├── build_price_verifier_windows.bat ← local build script for price_verifier/ — see below
 └── price_verifier/               ← SEPARATE tool: Amazon Price Verification Tool — see below
 ```
 
@@ -84,6 +86,24 @@ with its own architecture notes, its own `requirements.txt`, and its own
 read its README first. As of this writing it is implemented and
 offline-tested but **not yet validated against live Amazon** — see that
 README's "Known gaps" section before treating its output as trustworthy.
+
+Windows only, for now (no macOS spec). `price_verifier_windows.spec` builds
+a single-file `.exe` via PyInstaller — no Cython step, no license gate (this
+tool has neither); the packaged build deliberately excludes
+selenium/undetected-chromedriver since the default run flow never launches
+a browser (see `fetcher/session_bootstrap.py`'s note in the README). Flask
+templates ship as Python source (`price_verifier/templates_inline.py`, a
+Jinja `DictLoader`) rather than a `templates/` folder — this repo's own
+`gui.py` already avoids file-based Flask templates under PyInstaller for
+the same reason (nothing to get a frozen-path lookup wrong), and
+`price_verifier/` follows that precedent instead of introducing a new,
+untested mechanism.
+`.github/workflows/price_verifier_build.yml` builds the `.exe` on
+`windows-latest` and uploads it as a workflow artifact on every push that
+touches `price_verifier/**` or the spec — path-filtered, no `branches:`
+restriction, so it fires on any branch, not just after merging to main.
+`build_price_verifier_windows.bat` is the local equivalent, for
+reproducing a CI failure or building without waiting on CI.
 
 ---
 

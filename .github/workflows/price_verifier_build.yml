@@ -1,0 +1,55 @@
+name: Build Price Verification Tool (Windows)
+
+# Separate from build.yml on purpose — price_verifier/ is an independent
+# tool (see CLAUDE.md's price_verifier/ note) with no license system and no
+# secrets to bake in, so it gets its own simpler pipeline rather than a
+# third job bolted onto the scraper's build. Path-filtered so an unrelated
+# scraper.py commit doesn't trigger a rebuild, and no `branches:` filter so
+# it runs on every push to every branch that touches these files — "ready
+# right after commit," not just after merging to main.
+
+on:
+  push:
+    paths:
+      - "price_verifier/**"
+      - "price_verifier_windows.spec"
+      - "build_price_verifier_windows.bat"
+      - ".github/workflows/price_verifier_build.yml"
+  workflow_dispatch:       # allows manual trigger from GitHub UI
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r price_verifier/requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Run offline test suite (build gate)
+        run: python -m unittest discover -s price_verifier/tests -p "test_*.py"
+
+      - name: Build .exe
+        run: pyinstaller price_verifier_windows.spec --clean --noconfirm
+
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\Release_Windows | Out-Null
+          Copy-Item dist\PriceVerificationTool.exe dist\Release_Windows\
+          Copy-Item price_verifier\README.md dist\Release_Windows\
+
+      - name: Upload .exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PriceVerificationTool-Windows
+          path: dist\Release_Windows\
+          retention-days: 30

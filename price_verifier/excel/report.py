@@ -55,6 +55,24 @@ _ISSUE_SHEET_HEADERS = [
 
 _INVALID_SHEET_CHARS = re.compile(r"[\\/?*\[\]:]")
 
+# Excel/CSV formula-injection hardening: product_title and seller come from
+# scraped Amazon HTML — external, seller-controlled text — and this
+# workbook's whole purpose is to be forwarded to that seller (and possibly
+# re-exported to CSV downstream) by email. A cell value openpyxl writes as a
+# plain string is not itself a live formula in .xlsx, but a leading
+# =/+/-/@ is what spreadsheet apps' CSV importers (and some older Excel
+# "smart" behavior) key off to reinterpret text as a formula on open/paste.
+# Prefixing a leading apostrophe is the standard, invisible-in-Excel
+# mitigation (OWASP's CSV-injection guidance) and costs nothing for the
+# overwhelming majority of values that don't start with one of these.
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
+
+
+def _sanitize_cell_text(value):
+    if isinstance(value, str) and value and value[0] in _FORMULA_TRIGGER_CHARS:
+        return "'" + value
+    return value
+
 
 def _sanitize_sheet_name(name: str, used: set[str]) -> str:
     """Excel sheet names: <=31 chars, no \\ / ? * [ ] : , must be unique
@@ -104,8 +122,8 @@ def _issue_row(r: dict) -> tuple:
     diff = round(actual - expected, 2) if actual is not None else None
     return (
         r["asin"],
-        r["product_title"],
-        r["seller"],
+        _sanitize_cell_text(r["product_title"]),
+        _sanitize_cell_text(r["seller"]),
         expected,
         actual,
         r["mrp"],
@@ -163,7 +181,7 @@ def build_report(run_id: str, output_path: Path | None = None, db_path: Path = c
         ))
         brand_failed = sum(1 for r in brand_items if r["status"] == checkpoint.STATUS_FAILED)
         overview_rows.append((
-            brand, len(brand_items), matched, mismatched, oos, brand_failed, mismatched + oos,
+            _sanitize_cell_text(brand), len(brand_items), matched, mismatched, oos, brand_failed, mismatched + oos,
         ))
     _write_table(
         ws_overview,
@@ -185,7 +203,7 @@ def build_report(run_id: str, output_path: Path | None = None, db_path: Path = c
         ws_failed,
         ["asin", "brand", "error_reason", "attempts", "last_attempt_at"],
         ["ASIN", "Brand", "Error Reason", "Attempts", "Last Attempt At"],
-        [(r["asin"], r["brand"], r["error_reason"], r["attempts"], r["checked_at"]) for r in failed],
+        [(r["asin"], _sanitize_cell_text(r["brand"]), r["error_reason"], r["attempts"], r["checked_at"]) for r in failed],
     )
     if failed or items:
         summary_row = ws_failed.max_row + 2

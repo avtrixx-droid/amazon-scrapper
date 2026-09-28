@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -22,15 +23,22 @@ import webbrowser
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, url_for
+from jinja2 import DictLoader
 
 from price_verifier import config
 from price_verifier.excel.report import build_brand_report, build_report
 from price_verifier.ingest.input_parser import InputValidationError, parse_upload
 from price_verifier.pipeline.runner import run_pipeline
 from price_verifier.storage import checkpoint
+from price_verifier.templates_inline import TEMPLATES
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
+# Templates ship as Python source (templates_inline.py), not a templates/
+# folder, so there's no PyInstaller data-file path to get wrong when frozen —
+# see that module's docstring. render_template(name, ...) calls below are
+# unchanged; only where names resolve from changes.
+app.jinja_loader = DictLoader(TEMPLATES)
 
 # ── In-memory state (single-user; nothing here needs to survive a restart —
 #    SQLite is the durable record) ─────────────────────────────────────────
@@ -265,11 +273,53 @@ def history():
     return render_template("history.html", runs=runs)
 
 
+def _init_startup_log() -> None:
+    """A frozen Windows build runs windowed (no console — see
+    price_verifier_windows.spec's console=False), so an exception here would
+    otherwise just vanish with zero feedback: no traceback, no crash dialog,
+    the window simply never opens. Mirrors gui.py's own _init_startup_log()."""
+    try:
+        log_dir = config.BASE_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(log_dir / "startup.log"), encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+        logging.getLogger().addHandler(handler)
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("startup").info("BASE_DIR=%s frozen=%s", config.BASE_DIR, getattr(sys, "frozen", False))
+    except Exception:
+        pass  # Never let logging setup itself crash startup
+
+
+def _show_fatal_error(message: str) -> None:
+    """Best-effort native message box so a windowed frozen build doesn't
+    just silently disappear on a startup failure. No-op (falls through to
+    the log file only) on any platform/condition where this isn't possible —
+    never let the error-reporting path itself raise."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, "Price Verification Tool — Startup Error", 0x10)
+            return
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
+
+
 def main() -> None:
-    from price_verifier.storage.db import init_db
-    init_db(config.DB_PATH)
-    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5001/")).start()
-    app.run(host="127.0.0.1", port=5001, debug=False, threaded=True)
+    _init_startup_log()
+    try:
+        from price_verifier.storage.db import init_db
+        init_db(config.DB_PATH)
+        threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5001/")).start()
+        app.run(host="127.0.0.1", port=5001, debug=False, threaded=True)
+    except Exception:
+        logging.getLogger("startup").exception("Fatal startup error")
+        _show_fatal_error(
+            "The Price Verification Tool could not start.\n\n"
+            f"Details were written to:\n{config.BASE_DIR / 'logs' / 'startup.log'}"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

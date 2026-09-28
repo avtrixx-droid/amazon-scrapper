@@ -10,7 +10,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from price_verifier.excel.report import _sanitize_sheet_name, build_brand_report, build_report
+from price_verifier.excel.report import _sanitize_cell_text, _sanitize_sheet_name, build_brand_report, build_report
 from price_verifier.storage import checkpoint
 from price_verifier.storage.db import init_db
 
@@ -39,6 +39,23 @@ class SheetNameSanitizationTests(unittest.TestCase):
         used: set[str] = set()
         name = _sanitize_sheet_name("", used)
         self.assertTrue(name)
+
+
+class FormulaInjectionTests(unittest.TestCase):
+    def test_leading_equals_gets_apostrophe_prefix(self):
+        self.assertEqual(_sanitize_cell_text("=CMD('/c calc')"), "'=CMD('/c calc')")
+
+    def test_leading_plus_minus_at_get_prefixed(self):
+        self.assertEqual(_sanitize_cell_text("+1+1")[0], "'")
+        self.assertEqual(_sanitize_cell_text("-1+1")[0], "'")
+        self.assertEqual(_sanitize_cell_text("@SUM(1)")[0], "'")
+
+    def test_ordinary_text_untouched(self):
+        self.assertEqual(_sanitize_cell_text("Coco Blue Retail"), "Coco Blue Retail")
+
+    def test_none_and_non_string_untouched(self):
+        self.assertIsNone(_sanitize_cell_text(None))
+        self.assertEqual(_sanitize_cell_text(1499.0), 1499.0)
 
 
 class BuildReportTests(unittest.TestCase):
@@ -115,6 +132,26 @@ class BuildReportTests(unittest.TestCase):
         rows = list(wb["Lapcare"].iter_rows(values_only=True))
         self.assertEqual(rows[1][2], "Coco Blue Retail")  # Seller column
         self.assertEqual(rows[1][5], 1200.0)  # MRP column
+
+    def test_malicious_seller_name_neutralized_in_real_workbook(self):
+        run_cfg = checkpoint.RunConfig(input_filename="t.csv")
+        items = [checkpoint.RunItemRow(asin="B0000000Z1", expected_price=100.0, brand="Lapcare")]
+        run_id = checkpoint.create_run(run_cfg, items, db_path=self.db_path)
+        checkpoint.mark_item_result(
+            run_id, "B0000000Z1", checkpoint.STATUS_MISMATCHED, actual_price=150.0,
+            seller="=HYPERLINK(\"http://evil.example\",\"click me\")",
+            product_title="@SUM(A1:A9)", db_path=self.db_path,
+        )
+        path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
+        wb = load_workbook(path)
+        rows = list(wb["Lapcare"].iter_rows(values_only=True))
+        seller_cell, title_cell = rows[1][2], rows[1][1]
+        # openpyxl round-trips a leading apostrophe as a literal quote
+        # character on read-back (it's a formatting hint, not stored data),
+        # so what matters is that the value no longer starts with a
+        # formula-trigger character once the apostrophe guard is applied.
+        self.assertTrue(seller_cell.startswith("'"))
+        self.assertTrue(title_cell.startswith("'"))
 
     def test_overview_counts_per_brand(self):
         run_id = self._seed_run()
