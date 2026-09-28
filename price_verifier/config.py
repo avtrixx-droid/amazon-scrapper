@@ -30,10 +30,20 @@ MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 40
 
 DEFAULT_PRICE_SOURCE = "buybox"   # "buybox" | "lowest" — PENDING CONFIRMATION (spec Q2)
-DEFAULT_TOLERANCE_ABS = 1.0       # rupees — PENDING CONFIRMATION (spec Q3)
+
+# Confirmed by the vendor: flag any deviation of more than ₹1. tolerance_abs
+# is inclusive (diff <= 1.0 is NOT flagged, matching "more than 1 rupee").
+DEFAULT_TOLERANCE_ABS = 1.0
 DEFAULT_TOLERANCE_PCT = 0.0       # percent, applied in addition to abs if set
 
 MARKETPLACE_BASE_URL = "https://www.amazon.in"  # PENDING CONFIRMATION (spec Q5, .in assumed)
+
+# Confirmed by the vendor: the same price applies at every pincode, so no
+# delivery-location session bootstrap is needed for a normal run. This also
+# removes the biggest architectural risk from the original build (see
+# README.md "Known gaps" history) — plain anonymous HTTP requests, no
+# browser dependency, no cookie/session lifetime to manage.
+PINCODE_IS_A_FACTOR = False
 
 # ── Retry / resilience ─────────────────────────────────────────────────────
 MAX_ATTEMPTS = 3
@@ -47,6 +57,10 @@ CIRCUIT_BREAKER_COOLDOWN_SECONDS = 60
 CIRCUIT_BREAKER_MAX_COOLDOWN_SECONDS = 600
 
 # ── Input validation ───────────────────────────────────────────────────────
-REQUIRED_COLUMNS = ("asin", "expected_price")
+# "brand" is required (not just optional) because the whole point of the
+# report is one sheet per brand, issues only — see excel/report.py. pincode
+# is accepted if present (for the vendor's own record-keeping) but never
+# used, since price doesn't vary by pincode for this catalog.
+REQUIRED_COLUMNS = ("asin", "expected_price", "brand")
 OPTIONAL_COLUMNS = ("pincode",)
 ASIN_LENGTH = 10

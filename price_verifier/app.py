@@ -24,8 +24,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, url_for
 
 from price_verifier import config
-from price_verifier.excel.report import build_report
-from price_verifier.fetcher.session_bootstrap import BootstrapError, bootstrap_session
+from price_verifier.excel.report import build_brand_report, build_report
 from price_verifier.ingest.input_parser import InputValidationError, parse_upload
 from price_verifier.pipeline.runner import run_pipeline
 from price_verifier.storage import checkpoint
@@ -69,13 +68,16 @@ def _record_event(run_id: str, outcome) -> None:
         st["events"] = st["events"][-50:]  # bounded — this is a UI tail, not the record of truth
 
 
-def _run_in_background(run_id: str, items, session, run_cfg: checkpoint.RunConfig) -> None:
+def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig) -> None:
     async def on_item_done(outcome):
         _record_event(run_id, outcome)
 
     async def main():
+        # No session passed: price doesn't vary by pincode for this catalog
+        # (vendor-confirmed), so run_pipeline uses its anonymous-client
+        # default — no browser dependency, no pincode/cookie bootstrap.
         await run_pipeline(
-            run_id, items, session, run_cfg.concurrency,
+            run_id, items, run_cfg.concurrency,
             run_cfg.tolerance_abs, run_cfg.tolerance_pct, on_item_done=on_item_done,
         )
 
@@ -94,16 +96,12 @@ def _run_in_background(run_id: str, items, session, run_cfg: checkpoint.RunConfi
 
 
 def _start_run(items: list[checkpoint.RunItemRow], run_cfg: checkpoint.RunConfig, run_id: str | None = None) -> str:
-    """Bootstraps a browser session for the batch pincode, creates (or
-    resumes into) a run row, and launches the pipeline in a background
-    thread. Raises BootstrapError if the pincode session can't be
-    established — callers must not start the pipeline on an unset pincode.
-    """
-    session = bootstrap_session(run_cfg.pincode, city="")  # city only used for confirmation text; pincode is authoritative
+    """Creates (or resumes into) a run row and launches the pipeline in a
+    background thread. No browser/session bootstrap — see _run_in_background."""
     if run_id is None:
         run_id = checkpoint.create_run(run_cfg, items)
     _init_run_state(run_id, total=len(items))
-    thread = threading.Thread(target=_run_in_background, args=(run_id, items, session, run_cfg), daemon=True)
+    thread = threading.Thread(target=_run_in_background, args=(run_id, items, run_cfg), daemon=True)
     thread.start()
     return run_id
 
@@ -132,6 +130,7 @@ def upload():
         "report": report,
         "filename": file.filename,
     }
+    brand_count = len({r.brand for r in report.valid})
     return render_template(
         "confirm.html",
         upload_id=upload_id,
@@ -139,6 +138,7 @@ def upload():
         total_rows=report.total_rows,
         valid_rows=report.valid_rows,
         invalid_rows=report.invalid,
+        brand_count=brand_count,
         default_concurrency=config.DEFAULT_CONCURRENCY,
         default_tolerance_abs=config.DEFAULT_TOLERANCE_ABS,
         default_tolerance_pct=config.DEFAULT_TOLERANCE_PCT,
@@ -153,28 +153,19 @@ def start():
     if pending is None:
         return redirect(url_for("index"))
 
-    pincode = request.form.get("pincode", "").strip()
-    if not pincode:
-        return render_template("upload.html", error="Pincode is required.", incomplete=None)
-
     run_cfg = checkpoint.RunConfig(
         input_filename=pending["filename"],
-        pincode=pincode,
         price_source=request.form.get("price_source", config.DEFAULT_PRICE_SOURCE),
         tolerance_abs=float(request.form.get("tolerance_abs") or config.DEFAULT_TOLERANCE_ABS),
         tolerance_pct=float(request.form.get("tolerance_pct") or config.DEFAULT_TOLERANCE_PCT),
         concurrency=int(request.form.get("concurrency") or config.DEFAULT_CONCURRENCY),
     )
     items = [
-        checkpoint.RunItemRow(asin=r.asin, expected_price=r.expected_price)
+        checkpoint.RunItemRow(asin=r.asin, expected_price=r.expected_price, brand=r.brand)
         for r in pending["report"].valid
     ]
 
-    try:
-        run_id = _start_run(items, run_cfg)
-    except BootstrapError as e:
-        return render_template("upload.html", error=f"Could not set delivery pincode: {e}", incomplete=None)
-
+    run_id = _start_run(items, run_cfg)
     return redirect(url_for("progress_view", run_id=run_id))
 
 
@@ -185,14 +176,11 @@ def resume(run_id: str):
         return redirect(url_for("index"))
     pending_items = checkpoint.get_pending_and_retryable_items(run_id)
     run_cfg = checkpoint.RunConfig(
-        input_filename=run["input_filename"], pincode=run["pincode"],
+        input_filename=run["input_filename"],
         price_source=run["price_source"], tolerance_abs=run["tolerance_abs"],
         tolerance_pct=run["tolerance_pct"], concurrency=run["concurrency"],
     )
-    try:
-        _start_run(pending_items, run_cfg, run_id=run_id)
-    except BootstrapError as e:
-        return render_template("upload.html", error=f"Could not resume: {e}", incomplete=None)
+    _start_run(pending_items, run_cfg, run_id=run_id)
     return redirect(url_for("progress_view", run_id=run_id))
 
 
@@ -244,7 +232,8 @@ def results(run_id: str):
     run = checkpoint.get_run(run_id)
     if run is None:
         return redirect(url_for("index"))
-    return render_template("results.html", run=run)
+    brands = checkpoint.get_brands_with_issues(run_id)
+    return render_template("results.html", run=run, brands=brands)
 
 
 @app.route("/download/<run_id>")
@@ -256,6 +245,17 @@ def download(run_id: str):
         path = Path(run["output_path"])
         if not path.exists():
             path = build_report(run_id)
+    return send_file(str(path), as_attachment=True, download_name=path.name)
+
+
+@app.route("/download/<run_id>/brand/<path:brand>")
+def download_brand(run_id: str, brand: str):
+    """A single brand's issue list as a small standalone workbook, ready to
+    attach directly to the email that goes to that brand's seller."""
+    run = checkpoint.get_run(run_id)
+    if run is None:
+        return redirect(url_for("index"))
+    path = build_brand_report(run_id, brand)
     return send_file(str(path), as_attachment=True, download_name=path.name)
 
 

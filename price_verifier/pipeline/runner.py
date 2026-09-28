@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from price_verifier import config
-from price_verifier.fetcher.http_client import build_client, fetch_product_page
+from price_verifier.fetcher.http_client import build_anonymous_client, build_client, fetch_product_page
 from price_verifier.fetcher.models import FetchResult, ParsedProduct
 from price_verifier.fetcher.parser import parse_product_page
 from price_verifier.fetcher.session_bootstrap import BootstrappedSession
@@ -44,6 +44,8 @@ class ItemOutcome:
     product_title: Optional[str]
     url: Optional[str]
     error_reason: Optional[str]
+    mrp: Optional[float] = None
+    seller: Optional[str] = None
 
 
 def classify(
@@ -139,10 +141,15 @@ async def _process_one(
             run_id=run_id, asin=item.asin, status=status,
             actual_price=parsed.price if parsed else None,
             product_title=parsed.title if parsed else None,
+            mrp=parsed.mrp if parsed else None,
+            seller=parsed.seller if parsed else None,
             url=url_for(item.asin), error_reason=reason, db_path=db_path,
         )
         if on_item_done:
-            await on_item_done(ItemOutcome(item.asin, status, parsed.price if parsed else None, parsed.title if parsed else None, url_for(item.asin), reason))
+            await on_item_done(ItemOutcome(
+                item.asin, status, parsed.price if parsed else None, parsed.title if parsed else None,
+                url_for(item.asin), reason, parsed.mrp if parsed else None, parsed.seller if parsed else None,
+            ))
         return
 
     # Attempts exhausted on a retryable failure — terminal FAILED row.
@@ -159,10 +166,10 @@ async def _process_one(
 async def run_pipeline(
     run_id: str,
     items: list[checkpoint.RunItemRow],
-    session: BootstrappedSession,
     concurrency: int,
     tolerance_abs: float,
     tolerance_pct: float,
+    session: Optional[BootstrappedSession] = None,
     db_path=config.DB_PATH,
     on_item_done: Optional[Callable[[ItemOutcome], Awaitable[None]]] = None,
 ) -> None:
@@ -171,14 +178,20 @@ async def run_pipeline(
     gets a fresh MAX_ATTEMPTS budget for this pass — safe to call again
     after a crash or an explicit resume with a fresh `items` list, since
     resumability comes from re-querying the DB for non-terminal rows, not
-    from any state held in memory here."""
+    from any state held in memory here.
+
+    `session` is optional and unused by default: the vendor confirmed price
+    doesn't vary by pincode for this catalog, so a plain anonymous client
+    (no prior browser session, no cookie jar) is the default fetch path.
+    Pass a BootstrappedSession only if a future run genuinely needs a
+    warmed-up session for other reasons."""
     if not items:
         return
 
     def url_for(asin: str) -> str:
         return f"{config.MARKETPLACE_BASE_URL}/dp/{asin}"
 
-    client = build_client(session.cookies, session.user_agent)
+    client = build_client(session.cookies, session.user_agent) if session else build_anonymous_client()
     gate = DynamicGate(concurrency)
     pause = PauseGate()
     breaker = CircuitBreaker()

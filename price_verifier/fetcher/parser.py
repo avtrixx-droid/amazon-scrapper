@@ -189,6 +189,22 @@ def _extract_availability(scope, tree: HTMLParser) -> tuple[str | None, bool | N
     return None, None
 
 
+# ── Seller (ported from scraper.py extract_seller) ─────────────────────────
+# Matters for this tool specifically: the vendor emails the discrepancy to
+# whichever third-party seller (e.g. "coco blue") is showing the wrong
+# price, so knowing WHO is on the buy box is as important as the price
+# itself — a bare price mismatch with no seller name isn't actionable.
+_SELLER_SELECTORS = "#merchant-info a, #sellerProfileTriggerId, .offer-display-feature-text"
+
+
+def _extract_seller(scope, tree: HTMLParser) -> str:
+    node = scope.css_first(_SELLER_SELECTORS) or tree.css_first(_SELLER_SELECTORS)
+    if node is None:
+        return "Amazon"
+    text = node.text(strip=True)
+    return text if text else "Amazon"
+
+
 # ── Page classification (ported from scraper.py detect_captcha / detect_block /
 #    validate_page_is_product) ────────────────────────────────────────────────
 _BLOCK_INDICATORS = (
@@ -238,11 +254,15 @@ def parse_product_page(html: str, asin: str) -> ParsedProduct:
 
     title = _extract_title(tree)
     price = _extract_buybox_price(scope)
+    mrp = _extract_mrp(scope)
+    seller = _extract_seller(scope, tree)
     availability_raw, is_in_stock = _extract_availability(scope, tree)
 
     return ParsedProduct(
         title=title,
         price=price,
+        mrp=mrp,
+        seller=seller,
         availability_raw=availability_raw,
         page_kind="product",
         is_in_stock=is_in_stock,

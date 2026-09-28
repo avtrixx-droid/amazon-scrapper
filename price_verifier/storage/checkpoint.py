@@ -44,7 +44,10 @@ def _now() -> str:
 class RunItemRow:
     asin: str
     expected_price: float
+    brand: str = ""  # required for create_run's initial insert; unused/unset on resume reads
     actual_price: Optional[float] = None
+    mrp: Optional[float] = None
+    seller: Optional[str] = None
     product_title: Optional[str] = None
     url: Optional[str] = None
     status: str = STATUS_PENDING
@@ -56,7 +59,9 @@ class RunItemRow:
 @dataclass
 class RunConfig:
     input_filename: str
-    pincode: str
+    # Informational only — the vendor confirmed price doesn't vary by
+    # pincode for this catalog, so this is no longer collected from the UI.
+    pincode: str = "N/A"
     price_source: str = config.DEFAULT_PRICE_SOURCE
     tolerance_abs: float = config.DEFAULT_TOLERANCE_ABS
     tolerance_pct: float = config.DEFAULT_TOLERANCE_PCT
@@ -82,9 +87,9 @@ def create_run(run_cfg: RunConfig, items: list[RunItemRow], db_path: Path = conf
                 ),
             )
             conn.executemany(
-                """INSERT INTO run_items (run_id, asin, expected_price, status)
-                   VALUES (?, ?, ?, 'pending')""",
-                [(run_id, it.asin, it.expected_price) for it in items],
+                """INSERT INTO run_items (run_id, asin, brand, expected_price, status)
+                   VALUES (?, ?, ?, ?, 'pending')""",
+                [(run_id, it.asin, it.brand, it.expected_price) for it in items],
             )
             conn.execute("COMMIT")
         except Exception:
@@ -135,6 +140,8 @@ def mark_item_result(
     asin: str,
     status: str,
     actual_price: Optional[float] = None,
+    mrp: Optional[float] = None,
+    seller: Optional[str] = None,
     product_title: Optional[str] = None,
     url: Optional[str] = None,
     error_reason: Optional[str] = None,
@@ -146,10 +153,10 @@ def mark_item_result(
     with get_conn(db_path) as conn:
         conn.execute(
             """UPDATE run_items
-               SET status = ?, actual_price = ?, product_title = ?, url = ?,
+               SET status = ?, actual_price = ?, mrp = ?, seller = ?, product_title = ?, url = ?,
                    error_reason = ?, checked_at = ?
                WHERE run_id = ? AND asin = ?""",
-            (status, actual_price, product_title, url, error_reason, _now(), run_id, asin),
+            (status, actual_price, mrp, seller, product_title, url, error_reason, _now(), run_id, asin),
         )
         # Recompute counts from run_items rather than incrementing blindly —
         # a row retried across a resume (failed -> matched) must not double-count.
@@ -223,3 +230,24 @@ def get_run_items(run_id: str, status: Optional[str] = None, db_path: Path = con
                 "SELECT * FROM run_items WHERE run_id = ? ORDER BY asin", (run_id,)
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+# Statuses that represent a genuine pricing/listing problem worth emailing a
+# seller about — distinct from STATUS_FAILED, which just means "we couldn't
+# check this one," not "there's a discrepancy." Excel report + per-brand
+# downloads both key off this set.
+ISSUE_STATUSES = (STATUS_MISMATCHED, STATUS_OUT_OF_STOCK, STATUS_UNAVAILABLE, STATUS_NOT_FOUND)
+
+
+def get_brands_with_issues(run_id: str, db_path: Path = config.DB_PATH) -> list[str]:
+    """Distinct brands that have at least one issue row, alphabetical —
+    drives the per-brand download links on the results page."""
+    placeholders = ",".join("?" * len(ISSUE_STATUSES))
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            f"""SELECT DISTINCT brand FROM run_items
+                WHERE run_id = ? AND status IN ({placeholders})
+                ORDER BY brand COLLATE NOCASE""",
+            (run_id, *ISSUE_STATUSES),
+        ).fetchall()
+    return [r["brand"] for r in rows]

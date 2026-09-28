@@ -120,15 +120,18 @@ class RunPipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
         runner.build_client = lambda cookies, user_agent: httpx.AsyncClient(transport=transport, base_url="https://www.amazon.in")
 
         try:
-            run_cfg = checkpoint.RunConfig(input_filename="t.csv", pincode="110001", concurrency=3)
+            run_cfg = checkpoint.RunConfig(input_filename="t.csv", concurrency=3)
             items = [
-                checkpoint.RunItemRow(asin="B0MATCHOK01", expected_price=1499.0),
-                checkpoint.RunItemRow(asin="B0ALWAYSFAIL", expected_price=100.0),
+                checkpoint.RunItemRow(asin="B0MATCHOK01", expected_price=1499.0, brand="TestBrand"),
+                checkpoint.RunItemRow(asin="B0ALWAYSFAIL", expected_price=100.0, brand="TestBrand"),
             ]
             run_id = checkpoint.create_run(run_cfg, items, db_path=self.db_path)
             pending = checkpoint.get_pending_and_retryable_items(run_id, db_path=self.db_path)
 
-            await runner.run_pipeline(run_id, pending, self.session, concurrency=3, tolerance_abs=1.0, tolerance_pct=0, db_path=self.db_path)
+            await runner.run_pipeline(
+                run_id, pending, concurrency=3, tolerance_abs=1.0, tolerance_pct=0,
+                session=self.session, db_path=self.db_path,
+            )
 
             run = checkpoint.get_run(run_id, db_path=self.db_path)
             self.assertEqual(run["matched"], 1)
@@ -140,6 +143,58 @@ class RunPipelineIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([r.asin for r in resumable], ["B0ALWAYSFAIL"])
         finally:
             runner.build_client = original_build_client
+
+    async def test_default_run_uses_anonymous_client_no_session_needed(self):
+        """The vendor confirmed price doesn't vary by pincode, so a run
+        with no `session` argument at all (the app.py default) must still
+        work end to end — no pincode, no cookie jar, no browser dependency."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            asin = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, text=PRODUCT_HTML.format(asin=asin, price="1499.00"))
+
+        transport = httpx.MockTransport(handler)
+        original = runner.build_anonymous_client
+        runner.build_anonymous_client = lambda *a, **kw: httpx.AsyncClient(transport=transport, base_url="https://www.amazon.in")
+        try:
+            run_cfg = checkpoint.RunConfig(input_filename="t.csv", concurrency=2)
+            items = [checkpoint.RunItemRow(asin="B0NOSESSION", expected_price=1499.0, brand="TestBrand")]
+            run_id = checkpoint.create_run(run_cfg, items, db_path=self.db_path)
+            pending = checkpoint.get_pending_and_retryable_items(run_id, db_path=self.db_path)
+
+            await runner.run_pipeline(run_id, pending, concurrency=2, tolerance_abs=1.0, tolerance_pct=0, db_path=self.db_path)
+
+            run = checkpoint.get_run(run_id, db_path=self.db_path)
+            self.assertEqual(run["matched"], 1)
+        finally:
+            runner.build_anonymous_client = original
+
+    async def test_mrp_and_seller_flow_through_to_checkpoint(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            asin = request.url.path.rsplit("/", 1)[-1]
+            html = PRODUCT_HTML.replace(
+                '<input id="add-to-cart-button" name="submit.add-to-cart" type="submit">',
+                '<span class="a-price a-text-price basisPrice"><span class="a-offscreen">₹1,999.00</span></span>'
+                '<input id="add-to-cart-button" name="submit.add-to-cart" type="submit">'
+                '<div id="merchant-info">Sold by <a href="/x">Coco Blue Retail</a></div>',
+            )
+            return httpx.Response(200, text=html.format(asin=asin, price="1499.00"))
+
+        transport = httpx.MockTransport(handler)
+        original = runner.build_anonymous_client
+        runner.build_anonymous_client = lambda *a, **kw: httpx.AsyncClient(transport=transport, base_url="https://www.amazon.in")
+        try:
+            run_cfg = checkpoint.RunConfig(input_filename="t.csv", concurrency=1)
+            items = [checkpoint.RunItemRow(asin="B0MRPTEST01", expected_price=1499.0, brand="TestBrand")]
+            run_id = checkpoint.create_run(run_cfg, items, db_path=self.db_path)
+            pending = checkpoint.get_pending_and_retryable_items(run_id, db_path=self.db_path)
+
+            await runner.run_pipeline(run_id, pending, concurrency=1, tolerance_abs=1.0, tolerance_pct=0, db_path=self.db_path)
+
+            row = checkpoint.get_run_items(run_id, db_path=self.db_path)[0]
+            self.assertEqual(row["mrp"], 1999.0)
+            self.assertEqual(row["seller"], "Coco Blue Retail")
+        finally:
+            runner.build_anonymous_client = original
 
 
 if __name__ == "__main__":

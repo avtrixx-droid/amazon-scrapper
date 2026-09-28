@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at     TEXT,
     status          TEXT NOT NULL,      -- running | completed | crashed | cancelled
     input_filename  TEXT NOT NULL,
-    pincode         TEXT NOT NULL,
+    pincode         TEXT NOT NULL DEFAULT 'N/A',  -- informational only — price doesn't vary by pincode for this catalog
     price_source    TEXT NOT NULL,      -- buybox | lowest
     tolerance_abs   REAL NOT NULL,
     tolerance_pct   REAL NOT NULL,
@@ -40,8 +40,11 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS run_items (
     run_id          TEXT NOT NULL REFERENCES runs(run_id),
     asin            TEXT NOT NULL,
+    brand           TEXT NOT NULL,      -- groups the Excel output into one sheet per brand
     expected_price  REAL NOT NULL,
     actual_price    REAL,
+    mrp             REAL,
+    seller          TEXT,               -- who to email about a discrepancy (e.g. "Coco Blue Retail")
     product_title   TEXT,
     url             TEXT,
     status          TEXT NOT NULL DEFAULT 'pending',
@@ -53,6 +56,7 @@ CREATE TABLE IF NOT EXISTS run_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_items_run_status ON run_items(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_run_items_run_brand ON run_items(run_id, brand);
 """
 
 

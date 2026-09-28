@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Run complete</h2>
-<p class="muted">Run ID: {{ run.run_id }} &nbsp;|&nbsp; Pincode: {{ run.pincode }} &nbsp;|&nbsp; File: {{ run.input_filename }}</p>
+<p class="muted">Run ID: {{ run.run_id }} &nbsp;|&nbsp; File: {{ run.input_filename }}</p>
 
 <div class="stat-row">
   <div class="stat"><div class="n">{{ run.total_rows }}</div><div class="muted">Total</div></div>
@@ -11,6 +11,22 @@
   <div class="stat failed"><div class="n">{{ run.failed }}</div><div class="muted">Failed</div></div>
 </div>
 
-<a class="btn" href="{{ url_for('download', run_id=run.run_id) }}">Download workbook (.xlsx)</a>
+<a class="btn" href="{{ url_for('download', run_id=run.run_id) }}">Download full workbook (all brands, .xlsx)</a>
 <a class="btn btn-secondary" href="{{ url_for('index') }}">Start another run</a>
+
+{% if brands %}
+<h2 style="margin-top:32px;">Per-brand issue lists</h2>
+<p class="muted">Each of these is a single sheet with only that brand's mismatches / out-of-stock / not-found rows — attach directly to the email for that seller.</p>
+<table>
+  <tr><th>Brand</th><th></th></tr>
+  {% for brand in brands %}
+  <tr>
+    <td>{{ brand }}</td>
+    <td><a href="{{ url_for('download_brand', run_id=run.run_id, brand=brand) }}">Download</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted" style="margin-top:24px;">No brand had any issues — nothing to send.</p>
+{% endif %}
 {% endblock %}

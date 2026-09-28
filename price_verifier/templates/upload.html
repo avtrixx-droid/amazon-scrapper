@@ -7,7 +7,7 @@
 {% if incomplete %}
 <div class="notice">
   An earlier run (<strong>{{ incomplete.run_id }}</strong>, started {{ incomplete.started_at }}) did not finish —
-  {{ incomplete.total_rows }} rows, pincode {{ incomplete.pincode }}. Resume it, or discard it and start fresh.
+  {{ incomplete.total_rows }} rows. Resume it, or discard it and start fresh.
   <form method="post" action="{{ url_for('resume', run_id=incomplete.run_id) }}" style="display:inline">
     <button type="submit">Resume this run</button>
   </form>
@@ -17,7 +17,7 @@
 </div>
 {% endif %}
 
-<p class="muted">Upload a CSV or XLSX with <code>asin</code> and <code>expected_price</code> columns (an optional <code>pincode</code> column is read but not yet used per-row — see the batch pincode setting on the next screen).</p>
+<p class="muted">Upload a CSV or XLSX with <code>asin</code>, <code>expected_price</code>, and <code>brand</code> columns. The output is grouped into one sheet per brand — only rows with a price mismatch, an out-of-stock/unavailable listing, or a not-found ASIN are included, ready to forward to that brand's seller.</p>
 
 <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
   <label for="file">File</label>

@@ -1,6 +1,5 @@
 """
-http_client.py — async plain-HTTP product page fetches, replaying the cookie
-jar session_bootstrap.py captured.
+http_client.py — async plain-HTTP product page fetches.
 
 One httpx.AsyncClient per run, shared across all concurrent workers (httpx
 clients are safe for concurrent use — connection pooling is the point).
@@ -8,6 +7,14 @@ Concurrency is bounded by the caller's semaphore (pipeline/worker_pool.py),
 not here — this module does exactly one fetch attempt per call and reports
 what happened; retry policy lives in pipeline/retry.py so it's tested and
 tuned in one place.
+
+The vendor confirmed price doesn't vary by pincode for this catalog, so
+`build_anonymous_client()` — no cookie jar, no prior browser session — is
+the default path (see app.py). `build_client()` (cookie-jar replay from a
+session_bootstrap.BootstrappedSession) is kept for the case where a run
+needs a warmed-up session for other reasons (e.g. to look less like a
+fresh, un-visited client under heavier bot-defense); it is not used by
+default.
 """
 
 from __future__ import annotations
@@ -25,12 +32,33 @@ _DEFAULT_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
+# One realistic, current desktop Chrome UA, held fixed for the whole run —
+# consistent with a single "browser session" rather than rotating per
+# request (which reads as more automated, not less).
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def build_anonymous_client(user_agent: str = _DEFAULT_USER_AGENT) -> httpx.AsyncClient:
+    """No cookie jar, no prior session — a fresh client per run. This is the
+    default fetch path now that pincode is confirmed not to matter."""
+    headers = dict(_DEFAULT_HEADERS)
+    headers["User-Agent"] = user_agent
+    return httpx.AsyncClient(
+        base_url=config.MARKETPLACE_BASE_URL,
+        headers=headers,
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        http2=True,
+    )
+
 
 def build_client(cookies: dict[str, str], user_agent: str) -> httpx.AsyncClient:
-    """One client for the whole run. `cookies`/`user_agent` come from a
-    session_bootstrap.BootstrappedSession — the pincode lives entirely in
-    the cookie jar, so no per-request pincode parameter exists here (matches
-    the spec's batch-pincode architecture decision)."""
+    """Cookie-jar replay variant — `cookies`/`user_agent` come from a
+    session_bootstrap.BootstrappedSession. Not used by the default run
+    flow (see module docstring); kept for a future "warm session" option."""
     headers = dict(_DEFAULT_HEADERS)
     headers["User-Agent"] = user_agent
     return httpx.AsyncClient(

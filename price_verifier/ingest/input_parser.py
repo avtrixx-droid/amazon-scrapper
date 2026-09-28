@@ -37,7 +37,8 @@ class ParsedRow:
     row_number: int  # 1-based, matches what the vendor sees in Excel/CSV
     asin: str
     expected_price: Optional[float]
-    pincode: Optional[str]
+    brand: Optional[str]
+    pincode: Optional[str]  # accepted but never used — see config.PINCODE_IS_A_FACTOR
     valid: bool
     reason: Optional[str] = None  # populated when valid=False
 
@@ -145,6 +146,7 @@ def parse_upload(filename: str, data: bytes) -> ParseReport:
     # column, and silently guessing wrong would produce confidently-wrong
     # mismatches rather than the clear rejection the spec asks for.
     price_col = _find_column(header, "expected_price", "expectedprice", "expected price")
+    brand_col = _find_column(header, "brand", "brand name", "brandname")
     pincode_col = _find_column(header, "pincode", "pin code", "pin")
 
     missing = []
@@ -152,6 +154,8 @@ def parse_upload(filename: str, data: bytes) -> ParseReport:
         missing.append("asin")
     if price_col is None:
         missing.append("expected_price")
+    if brand_col is None:
+        missing.append("brand")
     if missing:
         raise InputValidationError(
             f"Missing required column(s): {', '.join(missing)}. "
@@ -168,17 +172,22 @@ def parse_upload(filename: str, data: bytes) -> ParseReport:
 
         asin, asin_err = _validate_asin(cell(asin_col))
         price = _coerce_price(cell(price_col))
+        brand_raw = cell(brand_col)
+        brand = str(brand_raw).strip() if brand_raw not in (None, "") else None
         pincode_raw = cell(pincode_col)
         pincode = str(pincode_raw).strip() if pincode_raw not in (None, "") else None
 
         if asin_err:
-            report.rows.append(ParsedRow(i, str(cell(asin_col) or ""), price, pincode, False, asin_err))
+            report.rows.append(ParsedRow(i, str(cell(asin_col) or ""), price, brand, pincode, False, asin_err))
             continue
         if price is None:
-            report.rows.append(ParsedRow(i, asin, None, pincode, False, "expected_price is missing or not numeric"))
+            report.rows.append(ParsedRow(i, asin, None, brand, pincode, False, "expected_price is missing or not numeric"))
+            continue
+        if not brand:
+            report.rows.append(ParsedRow(i, asin, price, None, pincode, False, "brand is required (used to group the output into one sheet per brand)"))
             continue
 
-        report.rows.append(ParsedRow(i, asin, price, pincode, True))
+        report.rows.append(ParsedRow(i, asin, price, brand, pincode, True))
 
     report.valid_rows = len(report.valid)
     report.invalid_rows = len(report.invalid)

@@ -14,6 +14,8 @@ class ParsedProduct:
 
     title: Optional[str] = None
     price: Optional[float] = None
+    mrp: Optional[float] = None
+    seller: Optional[str] = None
     availability_raw: Optional[str] = None
     page_kind: str = "unknown"  # product | captcha | not_found | blocked | unknown
     is_in_stock: Optional[bool] = None

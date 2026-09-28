@@ -66,11 +66,15 @@ AmazonScraper/
 
 ### `price_verifier/` — a second, independent tool in this repo
 
-This is a different product (price-vs-expected-price verification, batch
-CSV/XLSX upload, SQLite run history) with a deliberately different
-architecture (async plain-HTTP pipeline, not Selenium-per-row), built to
-hit a 10-30 minute / 2,000-ASIN target that the Selenium/multiprocessing
-model above cannot reach. **Everything in this file above and below —
+This is a different product (per-brand price-vs-expected-price
+verification — output is one Excel sheet per brand, issues only, meant to
+be emailed straight to the seller showing the wrong price) with a
+deliberately different architecture (async plain-HTTP pipeline, not
+Selenium-per-row), built to hit a 10-30 minute / 2,000-ASIN target that the
+Selenium/multiprocessing model above cannot reach. Per the vendor, price
+does not vary by pincode for this catalog, so — unlike `scraper.py` —
+`price_verifier/` has no pincode/delivery-location step at all. **Everything
+in this file above and below —
 "Do not switch to regular selenium or playwright," multiprocessing-only
 concurrency, the pincode-batching DOM-click loop, the Excel schema, the
 license system — governs `scraper.py`/`gui.py` only and does NOT apply to
