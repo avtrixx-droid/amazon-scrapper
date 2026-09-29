@@ -6,6 +6,9 @@
 # venv if you prefer — versions are compatible).
 
 httpx[http2]==0.28.1
+# Default fetch backend (fetcher/http_client.py): Chrome TLS/HTTP2 impersonation.
+# If it can't be imported, FetchSession falls back to httpx automatically.
+curl_cffi==0.16.3
 selectolax==0.3.28
 openpyxl==3.1.5
 flask==3.1.3

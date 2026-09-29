@@ -1,79 +1,269 @@
 """
 http_client.py — async plain-HTTP product page fetches.
 
-One httpx.AsyncClient per run, shared across all concurrent workers (httpx
-clients are safe for concurrent use — connection pooling is the point).
-Concurrency is bounded by the caller's semaphore (pipeline/worker_pool.py),
-not here — this module does exactly one fetch attempt per call and reports
-what happened; retry policy lives in pipeline/retry.py so it's tested and
-tuned in one place.
+`FetchSession` is the fetch path the pipeline uses. One session is one
+logical "browser identity": a TLS/HTTP2 fingerprint, a matching header set,
+and a persistent cookie jar that is reused for every request until
+`rotate()` throws the whole identity away and starts a fresh one.
 
-The vendor confirmed price doesn't vary by pincode for this catalog, so
-`build_anonymous_client()` — no cookie jar, no prior browser session — is
-the default path (see app.py). `build_client()` (cookie-jar replay from a
-session_bootstrap.BootstrappedSession) is kept for the case where a run
-needs a warmed-up session for other reasons (e.g. to look less like a
-fresh, un-visited client under heavier bot-defense); it is not used by
-default.
+Why this exists (evidence from the first real run, 30 ASINs @ concurrency 15):
+a cookieless plain-httpx client got ~15 good pages and then soft-block pages
+for everything after. Two signals give that kind of client away:
+
+1. **TLS / HTTP2 fingerprint.** httpx's TLS ClientHello (JA3/JA4) and its
+   HTTP/2 SETTINGS/priority frames look like Python, not Chrome — no matter
+   what the User-Agent says. A Chrome UA on a Python fingerprint is itself a
+   bot signal.
+2. **No session.** Every request arrived with no cookies, i.e. as a brand-new
+   visitor that deep-links straight to /dp/ pages at machine speed.
+
+Backends:
+
+- ``curl_cffi`` (default whenever it imports and no test transport is given):
+  ``curl_cffi.requests.AsyncSession(impersonate="chromeNNN")`` — libcurl
+  patched to reproduce Chrome's exact TLS handshake, HTTP/2 fingerprint and
+  header order. We deliberately do NOT set a User-Agent (or any sec-ch-ua /
+  sec-fetch header): impersonation sets ones that agree with the TLS
+  fingerprint, and overriding them would re-introduce a mismatch. We only
+  add ``Accept-Language: en-IN,en;q=0.9``.
+- ``httpx`` (fallback when curl_cffi can't be imported, or when a test passes
+  ``httpx_transport``): HTTP/2 with a coherent Chrome-on-Windows header set
+  (UA, sec-ch-ua*, sec-fetch-*, Accept, Accept-Language). It cannot fake the
+  TLS fingerprint — expect higher block rates than curl_cffi on live Amazon.
+
+Both backends:
+
+- warm up by seeding ``i18n-prefs=INR`` / ``lc-acbin=en_IN`` and GETting
+  ``/`` so that product requests carry Amazon's own session cookies
+  (session-id, ubid-acbin, ...). Warm-up failures are swallowed.
+- follow redirects, keep one cookie jar for the session's lifetime.
+- never raise from ``fetch()`` / ``rotate()`` / ``close()``; failures land in
+  ``FetchResult.error`` as one of:
+    "timeout" | "connection_error" | "throttled_or_server_error" (429/5xx,
+    body kept) | "http_error:<ExceptionName>".
+- never route loopback hosts (127.0.0.1 / localhost / ::1) through an
+  environment proxy — the local test servers and ``PV_MARKETPLACE_BASE_URL``
+  simulators must be reached directly even if HTTP(S)_PROXY is set and
+  NO_PROXY isn't.
+
+Concurrency is bounded by the caller (pipeline/worker_pool.py), not here;
+retry policy lives in the pipeline. This module does exactly one attempt
+per ``fetch()`` call.
+
+The module-level ``build_anonymous_client`` / ``build_client`` /
+``fetch_product_page`` helpers are the pre-FetchSession API, kept only
+until the pipeline finishes migrating to FetchSession.
 """
 
 from __future__ import annotations
+
+import asyncio
+import ipaddress
+import logging
+import random
+import time
+from urllib.parse import urlsplit
 
 import httpx
 
 from price_verifier import config
 from price_verifier.fetcher.models import FetchResult
 
-_DEFAULT_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-}
+log = logging.getLogger(__name__)
 
-# One realistic, current desktop Chrome UA, held fixed for the whole run —
-# consistent with a single "browser session" rather than rotating per
-# request (which reads as more automated, not less).
-_DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+try:  # optional at import time: the httpx backend works without it
+    from curl_cffi import requests as _curl_requests
+    from curl_cffi.requests import exceptions as _curl_exc
+
+    _CURL_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised only where curl_cffi is absent
+    _curl_requests = None
+    _curl_exc = None
+    _CURL_AVAILABLE = False
+
+
+ACCEPT_LANGUAGE = "en-IN,en;q=0.9"
+
+# Cookies a real amazon.in visitor with an Indian locale carries. Seeded
+# before warm-up so even the first request looks like a returning visitor
+# whose currency/language preference is already set.
+_SEED_COOKIES = {"i18n-prefs": "INR", "lc-acbin": "en_IN"}
+
+# Recent desktop Chrome impersonation targets, newest first. Filtered at
+# import time against what the installed curl_cffi actually ships
+# (curl_cffi.requests.BrowserType), so an older/newer curl_cffi just narrows
+# or changes the pool instead of failing at runtime.
+_CURL_CHROME_PREFERENCE = (
+    "chrome150", "chrome146", "chrome145", "chrome142", "chrome136", "chrome133a", "chrome131",
+)
+_CURL_POOL_SIZE = 4
+
+
+def _available_curl_targets() -> tuple[str, ...]:
+    if not _CURL_AVAILABLE:
+        return ()
+    try:
+        supported = {b.value for b in _curl_requests.BrowserType}
+    except Exception:
+        return ()
+    targets = [t for t in _CURL_CHROME_PREFERENCE if t in supported]
+    return tuple(targets[:_CURL_POOL_SIZE])
+
+
+CURL_CHROME_TARGETS: tuple[str, ...] = _available_curl_targets()
+
+# ── httpx fallback identities ────────────────────────────────────────────────
+# Each profile is internally coherent: the UA's Chrome major matches the
+# sec-ch-ua brand list (including that release's GREASE brand).
+_HTTPX_CHROME_PROFILES = (
+    ("146", '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'),
+    ("145", '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'),
+    ("142", '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"'),
 )
 
 
-def build_anonymous_client(user_agent: str = _DEFAULT_USER_AGENT) -> httpx.AsyncClient:
-    """No cookie jar, no prior session — a fresh client per run. This is the
-    default fetch path now that pincode is confirmed not to matter."""
-    headers = dict(_DEFAULT_HEADERS)
-    headers["User-Agent"] = user_agent
-    return httpx.AsyncClient(
-        base_url=config.MARKETPLACE_BASE_URL,
-        headers=headers,
-        timeout=config.REQUEST_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        http2=True,
-    )
+def _httpx_accept_encoding() -> str:
+    # Advertise only encodings this httpx install can actually decode: Chrome
+    # sends "gzip, deflate, br, zstd", but claiming br/zstd without the
+    # brotli/zstandard packages would hand us bodies we can't read.
+    try:
+        from httpx._decoders import SUPPORTED_DECODERS
+
+        encs = [e for e in ("gzip", "deflate", "br", "zstd") if e in SUPPORTED_DECODERS]
+        return ", ".join(encs) or "gzip, deflate"
+    except Exception:
+        return "gzip, deflate"
 
 
-def build_client(cookies: dict[str, str], user_agent: str) -> httpx.AsyncClient:
-    """Cookie-jar replay variant — `cookies`/`user_agent` come from a
-    session_bootstrap.BootstrappedSession. Not used by the default run
-    flow (see module docstring); kept for a future "warm session" option."""
-    headers = dict(_DEFAULT_HEADERS)
-    headers["User-Agent"] = user_agent
-    return httpx.AsyncClient(
-        base_url=config.MARKETPLACE_BASE_URL,
-        headers=headers,
-        cookies=cookies,
-        timeout=config.REQUEST_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        http2=True,
-    )
+def _httpx_chrome_headers(major: str, sec_ch_ua: str) -> dict[str, str]:
+    # Order mirrors Chrome's top-level navigation request.
+    return {
+        "sec-ch-ua": sec_ch_ua,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "upgrade-insecure-requests": "1",
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        ),
+        "accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+            "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+        ),
+        "sec-fetch-site": "none",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-user": "?1",
+        "sec-fetch-dest": "document",
+        "accept-encoding": _httpx_accept_encoding(),
+        "accept-language": ACCEPT_LANGUAGE,
+        "priority": "u=0, i",
+    }
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    host = host.strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _cookie_domain(host: str) -> str:
+    """Domain to seed cookies under. 'www.amazon.in' -> '.amazon.in' so every
+    amazon.in subdomain sees them (what Amazon itself sets); IPs/localhost
+    get the exact host (a leading dot would never match them)."""
+    host = host.strip("[]").lower()
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if "." not in host:
+        return host
+    if host.startswith("www."):
+        host = host[4:]
+    return "." + host
+
+
+def _map_status(asin: str, status: int, html: str | None, elapsed_ms: float, source: str) -> FetchResult:
+    if status == 429 or status >= 500:
+        return FetchResult(asin=asin, status_code=status, html=html,
+                           error="throttled_or_server_error", elapsed_ms=elapsed_ms, source=source)
+    return FetchResult(asin=asin, status_code=status, html=html, elapsed_ms=elapsed_ms, source=source)
+
+
+def _map_httpx_exception(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    # ConnectError covers DNS failure, refused connections and TLS handshake
+    # failures; ReadError/WriteError/CloseError are resets mid-exchange.
+    if isinstance(exc, (httpx.NetworkError, httpx.ProxyError)):
+        return "connection_error"
+    return f"http_error:{type(exc).__name__}"
+
+
+# libcurl error codes, for CurlErrors that curl_cffi didn't map to a subclass.
+_CURLE_TIMEOUT = {28}
+_CURLE_CONNECTION = {5, 6, 7, 35, 52, 55, 56, 58, 59, 60, 77, 83, 90, 91, 97}
+
+
+def _map_curl_exception(exc: BaseException) -> str:
+    if _curl_exc is not None:
+        # Timeout before ConnectionError: ConnectTimeout subclasses both.
+        if isinstance(exc, _curl_exc.Timeout):
+            return "timeout"
+        if isinstance(exc, (_curl_exc.ConnectionError, _curl_exc.ProxyError,
+                            _curl_exc.SSLError, _curl_exc.DNSError)):
+            return "connection_error"
+    code = getattr(exc, "code", None)
+    try:
+        code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    if code in _CURLE_TIMEOUT:
+        return "timeout"
+    if code in _CURLE_CONNECTION:
+        return "connection_error"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    return f"http_error:{type(exc).__name__}"
+
+
+class _Identity:
+    """One underlying client (curl_cffi AsyncSession or httpx.AsyncClient)
+    plus in-flight bookkeeping, so rotate() can retire it without cutting
+    off requests that are still running on it."""
+
+    __slots__ = ("client", "backend", "target", "inflight", "retired", "closed")
+
+    def __init__(self, client, backend: str, target: str):
+        self.client = client
+        self.backend = backend
+        self.target = target
+        self.inflight = 0
+        self.retired = False
+        self.closed = False
+
+    async def aclose(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.backend == "curl_cffi":
+                await self.client.close()
+            else:
+                await self.client.aclose()
+        except Exception:
+            log.debug("error closing %s client", self.backend, exc_info=True)
 
 
 class FetchSession:
     """One logical browser identity: a persistent cookie jar and a fixed
-    user agent / fingerprint, reused for every request until rotate().
+    TLS fingerprint / header set, reused for every request until rotate().
 
     CONTRACT (pipeline/ codes against exactly this surface):
       - FetchSession(*, base_url=None, httpx_transport=None)
@@ -88,64 +278,291 @@ class FetchSession:
       - await .rotate(): close and replace with a fresh identity (new
           cookie jar, new UA), then warm up again. Never raises.
       - await .close(): idempotent.
+
+    Optional keyword-only extras (not needed by the pipeline):
+      - timeout: per-request total timeout in seconds
+          (default config.REQUEST_TIMEOUT_SECONDS).
+      - prefer: "curl_cffi" | "httpx" — force a backend. "curl_cffi" silently
+          falls back to httpx when curl_cffi isn't importable.
+      - warm_up_timeout: cap for the homepage warm-up GET (default
+          min(timeout, 15s)) so a slow homepage can't stall a rotate().
+
+    Safe for concurrent use from many coroutines: fetch() calls share the
+    current identity; rotate() builds and warms the replacement first, swaps
+    it in, and closes the old one only after its in-flight requests finish.
     """
 
-    def __init__(self, *, base_url: str | None = None, httpx_transport=None):
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        httpx_transport=None,
+        timeout: float | None = None,
+        prefer: str | None = None,
+        warm_up_timeout: float | None = None,
+    ):
         self._base_url = (base_url or config.MARKETPLACE_BASE_URL).rstrip("/")
         self._transport = httpx_transport
-        self._client: httpx.AsyncClient | None = None
-        self.backend = "httpx"
+        self._timeout = float(timeout if timeout is not None else config.REQUEST_TIMEOUT_SECONDS)
+        self._warm_up_timeout = float(
+            warm_up_timeout if warm_up_timeout is not None else min(self._timeout, 15.0)
+        )
+        host = urlsplit(self._base_url).hostname or ""
+        self._host = host
+        self._bypass_env_proxy = _is_loopback_host(host)
+
+        use_curl = (
+            httpx_transport is None
+            and prefer != "httpx"
+            and _CURL_AVAILABLE
+            and bool(CURL_CHROME_TARGETS)
+        )
+        self.backend = "curl_cffi" if use_curl else "httpx"
+
+        # Start at a random point in the target pool so parallel runs (or a
+        # restarted run) don't all present the identical fingerprint.
+        pool = CURL_CHROME_TARGETS if use_curl else tuple(p[0] for p in _HTTPX_CHROME_PROFILES)
+        self._targets = pool
+        self._target_idx = random.randrange(len(pool)) if pool else 0
+
+        self._identity: _Identity | None = None
+        self._retired: set[_Identity] = set()
+        self._lock: asyncio.Lock | None = None
+        self._closed = False
+
+    # ── public API ───────────────────────────────────────────────────────
+    @property
+    def impersonate_target(self) -> str | None:
+        """curl_cffi impersonation target (e.g. "chrome146") or the Chrome
+        major the httpx profile claims — for logs/diagnostics only."""
+        return self._identity.target if self._identity is not None else None
 
     async def start(self, warm_up: bool = True) -> None:
+        try:
+            async with self._get_lock():
+                self._closed = False
+                if self._identity is not None:
+                    return
+                ident = self._new_identity()
+                if warm_up:
+                    await self._warm_up(ident)
+                self._identity = ident
+        except Exception:
+            log.warning("FetchSession.start failed", exc_info=True)
+
+    async def fetch(self, asin: str) -> FetchResult:
+        started = time.perf_counter()
+        try:
+            if self._closed:
+                return FetchResult(asin=asin, status_code=None, html=None,
+                                   error="http_error:SessionClosed")
+            ident = self._identity
+            if ident is None:
+                await self.start()
+                ident = self._identity
+                if ident is None:
+                    return FetchResult(asin=asin, status_code=None, html=None,
+                                       error="http_error:SessionStartFailed",
+                                       elapsed_ms=_ms_since(started))
+            ident.inflight += 1
+            try:
+                return await self._fetch_on(ident, asin, started)
+            finally:
+                ident.inflight -= 1
+                if ident.retired and ident.inflight <= 0:
+                    await self._dispose(ident)
+        except Exception as exc:  # never raise (CancelledError is BaseException and still propagates)
+            log.debug("unexpected fetch failure for %s", asin, exc_info=True)
+            return FetchResult(asin=asin, status_code=None, html=None,
+                               error=f"http_error:{type(exc).__name__}",
+                               elapsed_ms=_ms_since(started))
+
+    async def rotate(self) -> None:
+        try:
+            async with self._get_lock():
+                if self._closed:
+                    return
+                if len(self._targets) > 1:
+                    self._target_idx = (self._target_idx + 1) % len(self._targets)
+                new = self._new_identity()
+                await self._warm_up(new)
+                old, self._identity = self._identity, new
+            if old is not None:
+                await self._retire(old)
+        except Exception:
+            log.warning("FetchSession.rotate failed", exc_info=True)
+
+    async def close(self) -> None:
+        try:
+            self._closed = True
+            ident, self._identity = self._identity, None
+            if ident is not None:
+                await ident.aclose()
+            for old in list(self._retired):
+                await old.aclose()
+            self._retired.clear()
+        except Exception:
+            log.debug("FetchSession.close failed", exc_info=True)
+
+    # ── internals ────────────────────────────────────────────────────────
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _current_target(self) -> str:
+        return self._targets[self._target_idx] if self._targets else ""
+
+    def _new_identity(self) -> _Identity:
+        target = self._current_target()
+        if self.backend == "curl_cffi":
+            client = self._build_curl(target)
+        else:
+            client = self._build_httpx(target)
+        return _Identity(client, self.backend, target)
+
+    def _build_curl(self, target: str):
+        kwargs = dict(
+            impersonate=target,
+            base_url=self._base_url,
+            headers={"Accept-Language": ACCEPT_LANGUAGE},
+            timeout=self._timeout,
+            allow_redirects=True,
+            max_clients=max(40, config.MAX_CONCURRENCY),
+            trust_env=not self._bypass_env_proxy,
+        )
+        if self._bypass_env_proxy:
+            # trust_env=False only stops curl_cffi's own env lookup; libcurl
+            # itself still honours http_proxy/ALL_PROXY unless told otherwise.
+            from curl_cffi import CurlOpt
+
+            kwargs["curl_options"] = {CurlOpt.NOPROXY: "*"}
+        session = _curl_requests.AsyncSession(**kwargs)
+        self._seed_cookies(session.cookies)
+        return session
+
+    def _build_httpx(self, target: str) -> httpx.AsyncClient:
+        sec_ch_ua = dict(_HTTPX_CHROME_PROFILES).get(target, _HTTPX_CHROME_PROFILES[0][1])
         kwargs = dict(
             base_url=self._base_url,
-            headers={**_DEFAULT_HEADERS, "User-Agent": _DEFAULT_USER_AGENT},
-            timeout=config.REQUEST_TIMEOUT_SECONDS,
+            headers=_httpx_chrome_headers(target or _HTTPX_CHROME_PROFILES[0][0], sec_ch_ua),
+            timeout=self._timeout,
             follow_redirects=True,
         )
         if self._transport is not None:
             kwargs["transport"] = self._transport
         else:
             kwargs["http2"] = True
-        self._client = httpx.AsyncClient(**kwargs)
-        if warm_up:
+            kwargs["trust_env"] = not self._bypass_env_proxy
+            kwargs["limits"] = httpx.Limits(
+                max_connections=max(40, config.MAX_CONCURRENCY) + 10,
+                max_keepalive_connections=max(40, config.MAX_CONCURRENCY),
+            )
+        client = httpx.AsyncClient(**kwargs)
+        self._seed_cookies(client.cookies)
+        return client
+
+    def _seed_cookies(self, jar) -> None:
+        if not self._host:
+            return
+        domain = _cookie_domain(self._host)
+        for name, value in _SEED_COOKIES.items():
             try:
-                await self._client.get("/")
+                jar.set(name, value, domain=domain, path="/")
             except Exception:
-                pass
+                log.debug("could not seed cookie %s", name, exc_info=True)
 
-    async def fetch(self, asin: str) -> FetchResult:
-        if self._client is None:
-            await self.start()
-        return await fetch_product_page(self._client, asin)
+    async def _warm_up(self, ident: _Identity) -> None:
+        # Both clients accept a per-request `timeout=` override. The response
+        # itself is irrelevant — the point is the Set-Cookie headers.
+        try:
+            await ident.client.get("/", timeout=self._warm_up_timeout)
+        except Exception:
+            log.debug("warm-up GET / failed (ignored)", exc_info=True)
 
-    async def rotate(self) -> None:
-        await self.close()
-        await self.start()
+    async def _fetch_on(self, ident: _Identity, asin: str, started: float) -> FetchResult:
+        mapper = _map_curl_exception if ident.backend == "curl_cffi" else _map_httpx_exception
+        try:
+            resp = await ident.client.get(f"/dp/{asin}")
+        except Exception as exc:
+            return FetchResult(asin=asin, status_code=None, html=None,
+                               error=mapper(exc), elapsed_ms=_ms_since(started))
+        return _map_status(asin, int(resp.status_code), _safe_text(resp), _ms_since(started), "http")
 
-    async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
+    async def _retire(self, ident: _Identity) -> None:
+        ident.retired = True
+        if ident.inflight <= 0:
+            await self._dispose(ident)
+        else:
+            self._retired.add(ident)
+
+    async def _dispose(self, ident: _Identity) -> None:
+        self._retired.discard(ident)
+        await ident.aclose()
+
+
+def _ms_since(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000.0, 1)
+
+
+def _safe_text(resp) -> str | None:
+    try:
+        return resp.text
+    except Exception:
+        try:
+            return resp.content.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+
+# ── Legacy API (pre-FetchSession) — kept until the pipeline migration lands ──
+_DEFAULT_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": ACCEPT_LANGUAGE,
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+
+
+def build_anonymous_client(user_agent: str = _DEFAULT_USER_AGENT) -> httpx.AsyncClient:
+    """Legacy: no cookie jar, no prior session. Superseded by FetchSession."""
+    headers = dict(_DEFAULT_HEADERS)
+    headers["User-Agent"] = user_agent
+    return httpx.AsyncClient(
+        base_url=config.MARKETPLACE_BASE_URL,
+        headers=headers,
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        http2=True,
+    )
+
+
+def build_client(cookies: dict[str, str], user_agent: str) -> httpx.AsyncClient:
+    """Legacy cookie-jar replay variant (session_bootstrap). Superseded by FetchSession."""
+    headers = dict(_DEFAULT_HEADERS)
+    headers["User-Agent"] = user_agent
+    return httpx.AsyncClient(
+        base_url=config.MARKETPLACE_BASE_URL,
+        headers=headers,
+        cookies=cookies,
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        http2=True,
+    )
 
 
 async def fetch_product_page(client: httpx.AsyncClient, asin: str) -> FetchResult:
-    """Single fetch attempt, no retry. Errors are captured, never raised —
-    the pipeline decides what a given error means for the row's status."""
-    url = f"/dp/{asin}"
+    """Legacy single fetch attempt on a caller-owned httpx client. Never raises."""
+    started = time.perf_counter()
     try:
-        resp = await client.get(url)
-    except httpx.TimeoutException:
-        return FetchResult(asin=asin, status_code=None, html=None, error="timeout")
-    except httpx.ConnectError:
-        return FetchResult(asin=asin, status_code=None, html=None, error="connection_error")
-    except httpx.HTTPError as e:
-        return FetchResult(asin=asin, status_code=None, html=None, error=f"http_error:{type(e).__name__}")
-
-    if resp.status_code >= 500 or resp.status_code == 429 or resp.status_code == 503:
-        return FetchResult(asin=asin, status_code=resp.status_code, html=resp.text, error="throttled_or_server_error")
-
-    return FetchResult(asin=asin, status_code=resp.status_code, html=resp.text)
+        resp = await client.get(f"/dp/{asin}")
+    except Exception as exc:
+        return FetchResult(asin=asin, status_code=None, html=None,
+                           error=_map_httpx_exception(exc), elapsed_ms=_ms_since(started))
+    return _map_status(asin, resp.status_code, _safe_text(resp), _ms_since(started), "http")
