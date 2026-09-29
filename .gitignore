@@ -41,3 +41,6 @@ _build_config.py
 
 # price_verifier/ — runtime data (SQLite DB, uploads, debug HTML dumps)
 price_verifier/data/
+
+# Claude Code sub-agent worktrees (tooling, never commit)
+.claude/worktrees/
