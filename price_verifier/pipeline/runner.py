@@ -375,6 +375,21 @@ class _SessionManager:
             except Exception:
                 pass
 
+    def claim_block(self, gen: int) -> bool:
+        """Synchronously mark `gen` blocked. True only for the FIRST report
+        against the CURRENT identity — i.e. a new block event, which is what
+        the rate limiter should count and pause for. Reports against an
+        identity that is already blocked / already rotated away are echoes of
+        that same event. Keyed on the session generation the request actually
+        used (not on when it acquired its rate-limit slot), so a freshly
+        rotated identity that is blocked too always counts as a new event —
+        otherwise identities could be burned back-to-back with no pause."""
+        new = gen == self.generation and gen not in self._blocked
+        self._blocked.add(gen)
+        if gen == self.generation:
+            self._ready.clear()  # stop new fetches on the blocked identity immediately
+        return new
+
     async def report_block(self, gen: int) -> bool:
         """Mark `gen` blocked; rotate if it is still current. Returns True if
         this call performed the rotation."""
@@ -513,11 +528,17 @@ class _Pipeline:
             product_title=outcome.product_title, url=outcome.url, error_reason=reason,
             scraped_brand=outcome.scraped_brand, resolved_by=resolved_by,
         )
+        await self._after_final(outcome, html, source)
+
+    async def _after_final(self, outcome: ItemOutcome, html: Optional[str], source: str) -> None:
+        """Stats, debug dump and on_item_done — after the row's DB write."""
+        status, resolved_by, reason = outcome.status, outcome.resolved_by, outcome.error_reason
+        item_asin = outcome.asin
         self.stats.finalized += 1
         self.stats.status_counts[status] = self.stats.status_counts.get(status, 0) + 1
         self.stats.resolved_by[resolved_by] = self.stats.resolved_by.get(resolved_by, 0) + 1
-        if status not in (checkpoint.STATUS_MATCHED, checkpoint.STATUS_MISMATCHED):
-            await self._debug(item.asin, html, f"{status}: {reason}", source)
+        if status not in (checkpoint.STATUS_MATCHED, checkpoint.STATUS_MISMATCHED) and html:
+            await self._debug(item_asin, html, f"{status}: {reason}", source)
         if self.on_item_done is not None:
             try:
                 await self.on_item_done(outcome)
@@ -531,6 +552,35 @@ class _Pipeline:
         src = source or ("browser" if rb == checkpoint.RESOLVED_BY_BROWSER else "http")
         await self._finalize(work, checkpoint.STATUS_FAILED, reason, None, rb, html, src)
 
+    async def _fail_many(self, works: list[_Work], note: str, resolved_by: Optional[str] = None) -> None:
+        """_fail() for a whole batch in ONE database transaction. Used when a
+        pass gives up on everything left (Chrome missing / dead / blocked,
+        double-check turned off): per-row writes would take minutes on a
+        slow Windows disk for a large run, with the UI sitting still."""
+        todo = [w for w in works if w.item.asin not in self._finalized]
+        if not todo:
+            return
+        outcomes = []
+        for w in todo:
+            self._finalized.add(w.item.asin)
+            reason = f"{note} (last error: {w.last_reason})" if w.last_reason else note
+            outcomes.append(ItemOutcome(
+                asin=w.item.asin, status=checkpoint.STATUS_FAILED, actual_price=None, product_title=None,
+                url=_url_for(w.item.asin), error_reason=reason, mrp=None, seller=None, scraped_brand=None,
+                resolved_by=resolved_by or w.last_source,
+            ))
+
+        async def write_all():
+            await self._db(checkpoint.mark_items_failed, self.run_id,
+                           [(o.asin, o.error_reason, o.url, o.resolved_by) for o in outcomes])
+            for o in outcomes:
+                await self._after_final(o, None, "http")
+
+        task = asyncio.ensure_future(write_all())  # shielded, like _finalize
+        self._finalizers.add(task)
+        task.add_done_callback(self._finalizers.discard)
+        await asyncio.shield(task)
+
     # ── HTTP passes ──────────────────────────────────────────────────────────
     async def _http_item(self, ctx: _PassCtx, work: _Work) -> None:
         item = work.item
@@ -539,7 +589,7 @@ class _Pipeline:
             if ctx.aborted:
                 break
             try:
-                ticket = await ctx.limiter.acquire()
+                await ctx.limiter.acquire()
             except LimiterClosed:
                 break
             try:
@@ -551,20 +601,58 @@ class _Pipeline:
             ctx.stats.attempts += 1
             attempted = True
             work.last_source = ctx.resolved_by
-            await self._db(checkpoint.record_attempt, self.run_id, item.asin)
 
             parsed = parse_product_page(fetch.html, item.asin) if fetch.html else None
             status, reason, action = classify(fetch, parsed, item.expected_price, self.tol_abs, self.tol_pct)
 
-            if action == ACTION_FINAL:
-                ctx.limiter.on_success()
+            # Every pacing / blocking / abort decision is made synchronously,
+            # BEFORE the first await: DB writes hop to a thread (slow on a
+            # Windows disk), and until the limiter pauses, the identity is
+            # marked blocked and a dead pass is aborted, the other workers
+            # keep sending requests on a flagged identity / dead network.
+            blocked = new_event = False
+            pause = 0.0
+            if action in (ACTION_FINAL, ACTION_BROWSER):
+                ctx.limiter.on_success()  # for BROWSER: the fetch worked, the page is just ambiguous
                 ctx.error_streak = 0
+            else:
+                ctx.error_streak += 1
+                work.last_reason = reason or "unknown"
+                if not ctx.aborted and is_block_signal(fetch, parsed):
+                    blocked = True
+                    ctx.stats.block_reports += 1
+                    new_event = ctx.sessions.claim_block(gen)
+                    pause = ctx.limiter.on_block(ctx.limiter.epoch if new_event else -1)
+                    if new_event:
+                        ctx.stats.blocks += 1
+                        if ctx.limiter.block_streak >= ctx.abort_streak:
+                            self._abort_pass(ctx, f"{ctx.limiter.block_streak} blocks in a row", work.last_reason)
+                if ctx.error_streak >= ctx.error_abort_streak:
+                    self._abort_pass(ctx, f"{ctx.error_streak} failed requests in a row", work.last_reason)
+
+            if blocked:
+                # Always follows claim_block(): it re-opens the session gate
+                # that claim_block closed, so no worker is left waiting on it.
+                rotated = await ctx.sessions.report_block(gen)
+                if rotated:
+                    ctx.stats.rotations += 1
+                if new_event:
+                    logger.warning("[%s] block event (%s) on %s: pause %.1fs, rate now %.2f rps, rotated=%s",
+                                   ctx.name, reason, item.asin, pause, ctx.limiter.current_rps, rotated)
+                    await self._debug(item.asin, fetch.html, f"block: {reason}", "http")
+                    await self._phase(ctx.name, {
+                        "event": "block", "reason": reason, "pause_seconds": round(pause, 2),
+                        "rps": round(ctx.limiter.current_rps, 3), "blocks": ctx.stats.blocks,
+                        "rotations": ctx.stats.rotations,
+                    })
+
+            await self._db(checkpoint.record_attempt, self.run_id, item.asin)
+
+            if action == ACTION_FINAL:
                 ctx.stats.resolved += 1
                 await self._finalize(work, status, reason, parsed, ctx.resolved_by, fetch.html, "http")
                 return
             if action == ACTION_BROWSER:
-                ctx.limiter.on_success()  # the fetch itself worked; the page is just ambiguous
-                ctx.error_streak = 0
                 work.last_reason = reason or "ambiguous product page"
                 await self._db(checkpoint.note_item_attempt_failure, self.run_id, item.asin,
                                f"needs Chrome double-check: {work.last_reason}")
@@ -574,33 +662,9 @@ class _Pipeline:
                 return
 
             # ACTION_RETRY
-            work.last_reason = reason or "unknown"
-            ctx.error_streak += 1
             await self._db(checkpoint.note_item_attempt_failure, self.run_id, item.asin, work.last_reason)
-            if is_block_signal(fetch, parsed):
-                ctx.stats.block_reports += 1
-                epoch_before = ctx.limiter.epoch
-                pause = ctx.limiter.on_block(ticket)
-                new_event = ctx.limiter.epoch != epoch_before
-                rotated = await ctx.sessions.report_block(gen)
-                if rotated:
-                    ctx.stats.rotations += 1
-                if new_event:
-                    ctx.stats.blocks += 1
-                    logger.warning("[%s] block event (%s) on %s: pause %.1fs, rate now %.2f rps, rotated=%s",
-                                   ctx.name, reason, item.asin, pause, ctx.limiter.current_rps, rotated)
-                    await self._debug(item.asin, fetch.html, f"block: {reason}", "http")
-                    await self._phase(ctx.name, {
-                        "event": "block", "reason": reason, "pause_seconds": round(pause, 2),
-                        "rps": round(ctx.limiter.current_rps, 3), "blocks": ctx.stats.blocks,
-                        "rotations": ctx.stats.rotations,
-                    })
-                    if ctx.limiter.block_streak >= ctx.abort_streak:
-                        self._abort_pass(ctx, f"{ctx.limiter.block_streak} blocks in a row", work.last_reason)
-            elif ctx.error_streak < ctx.error_abort_streak:
+            if not blocked and not ctx.aborted:
                 await self._sleep(self.t.retry_backoff * (0.5 + self._rng.random()))
-            if ctx.error_streak >= ctx.error_abort_streak:
-                self._abort_pass(ctx, f"{ctx.error_streak} failed requests in a row", work.last_reason)
 
         if not attempted and ctx.aborted:
             work.last_reason = ctx.abort_reason
@@ -672,14 +736,12 @@ class _Pipeline:
         if not works:
             return
         if not self.use_browser:
-            for w in works:
-                await self._fail(w, "could not be verified (Chrome double-check is turned off)")
+            await self._fail_many(works, "could not be verified (Chrome double-check is turned off)")
             return
         available = self.browser_factory is not None or await asyncio.to_thread(browser_fallback.chrome_available)
         self.stats.browser_available = available
         if not available:
-            for w in works:
-                await self._fail(w, "could not be verified (Google Chrome not found for a double-check)")
+            await self._fail_many(works, "could not be verified (Google Chrome not found for a double-check)")
             return
 
         st.ran = True
@@ -694,8 +756,7 @@ class _Pipeline:
             except Exception as e:
                 self.stats.browser_available = False
                 msg = str(e) if isinstance(e, browser_fallback.BrowserUnavailable) else "Chrome could not be started"
-                for w in remaining:
-                    await self._fail(w, f"could not be verified ({msg})")
+                await self._fail_many(remaining, f"could not be verified ({msg})")
                 remaining = []
                 return
 
@@ -721,8 +782,7 @@ class _Pipeline:
                         note = "could not be verified (Amazon is also blocking Chrome right now; retry later)"
                     else:
                         note = "could not be verified (Chrome could not load Amazon pages either; retry later)"
-                    for w in remaining:
-                        await self._fail(w, note, resolved_by=checkpoint.RESOLVED_BY_BROWSER)
+                    await self._fail_many(remaining, note, resolved_by=checkpoint.RESOLVED_BY_BROWSER)
                     remaining = []
         finally:
             st.duration_s = round(time.monotonic() - t0, 3)

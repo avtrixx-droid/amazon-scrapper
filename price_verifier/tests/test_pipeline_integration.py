@@ -522,3 +522,55 @@ class CancelAndResumeTests(PipelineHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlowDiskTests(PipelineHarness):
+    """Same scenarios with every DB write taking 40 ms, as on a slow Windows
+    disk. Regression for two bugs that only showed up on the Windows CI
+    runner: block/abort decisions made AFTER the (thread-hopped) DB writes
+    let other workers keep hammering a flagged identity, and a freshly
+    rotated identity that was also blocked was coalesced into the previous
+    block event (rotation with no pause / no abort count)."""
+
+    def setUp(self):
+        super().setUp()
+        real_db = runner._Pipeline._db
+
+        async def slow_db(pipeline, fn, *a, **k):
+            await asyncio.sleep(0.04)
+            return await real_db(pipeline, fn, *a, **k)
+
+        self._slow = mock.patch.object(runner._Pipeline, "_db", slow_db)
+        self._slow.start()
+
+    def tearDown(self):
+        self._slow.stop()
+        super().tearDown()
+
+    async def test_dead_identities_still_count_as_block_events(self):
+        amazon = FakeAmazon(dead_identities=range(1, 100))
+        run_id, pending = self.make_run(asins(12))
+        stats = await self.go(run_id, pending, amazon, FakeBrowser(amazon))
+        self.assertTrue(stats.fast.aborted and stats.recovery.aborted)
+        self.assertLessEqual(stats.fast.blocks, fast_tuning().fast_abort_block_streak)
+        # every identity used by a pass is paid for with a counted block event
+        self.assertLessEqual(stats.fast.rotations, stats.fast.blocks)
+        self.assertEqual(stats.browser.resolved, 12)
+
+    async def test_blocked_identity_not_reused_with_slow_writes(self):
+        amazon = FakeAmazon(block_after=10)
+        all_asins = asins(40)
+        run_id, pending = self.make_run(all_asins)
+        stats = await self.go(run_id, pending, amazon, FakeBrowser(amazon))
+        self.assertEqual(stats.failed, 0)
+        for s in amazon.sessions:
+            self.assertLessEqual(s.fetches_after_block, 8, f"identity {s.ident} reused after block")
+        self.assert_each_finalized_once(all_asins)
+
+    async def test_network_down_batch_fails_quickly(self):
+        amazon = FakeAmazon(network_down=True)
+        run_id, pending = self.make_run(asins(200))
+        t0 = time.monotonic()
+        stats = await self.go(run_id, pending, amazon, FakeBrowser(amazon, broken=True))
+        self.assertEqual(stats.failed, 200)
+        self.assertLess(time.monotonic() - t0, 8.0, "remaining rows must be failed in one batch, not row by row")

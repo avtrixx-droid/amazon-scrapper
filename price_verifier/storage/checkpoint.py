@@ -233,6 +233,31 @@ def mark_item_result(
         _recompute_run_counts(conn, run_id)
 
 
+def mark_items_failed(
+    run_id: str, rows: list[tuple[str, str, str, Optional[str]]], db_path: Path = config.DB_PATH
+) -> None:
+    """Batch form of mark_item_result(status=FAILED) for many rows in one
+    transaction: rows are (asin, error_reason, url, resolved_by)."""
+    if not rows:
+        return
+    now = _now()
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                """UPDATE run_items
+                   SET status = 'failed', actual_price = NULL, mrp = NULL, seller = NULL, product_title = NULL,
+                       url = ?, error_reason = ?, checked_at = ?, scraped_brand = NULL, resolved_by = ?
+                   WHERE run_id = ? AND asin = ?""",
+                [(url, reason, now, rb, run_id, asin) for asin, reason, url, rb in rows],
+            )
+            _recompute_run_counts(conn, run_id)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def _recompute_run_counts(conn, run_id: str) -> None:
     oos_placeholders = ",".join("?" * len(OUT_OF_STOCK_BUCKET))
     counts = conn.execute(
