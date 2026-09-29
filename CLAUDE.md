@@ -71,8 +71,10 @@ AmazonScraper/
 This is a different product (per-brand price-vs-expected-price
 verification — output is one Excel sheet per brand, issues only, meant to
 be emailed straight to the seller showing the wrong price) with a
-deliberately different architecture (async plain-HTTP pipeline, not
-Selenium-per-row), built to hit a 10-30 minute / 2,000-ASIN target that the
+deliberately different architecture (async HTTP pipeline using curl_cffi
+Chrome impersonation + an AIMD rate limiter, with real Chrome only as a
+last-resort third pass — not Selenium-per-row), built to hit a
+10-30 minute / 2,000-ASIN target that the
 Selenium/multiprocessing model above cannot reach. Per the vendor, price
 does not vary by pincode for this catalog, so — unlike `scraper.py` —
 `price_verifier/` has no pincode/delivery-location step at all. **Everything
@@ -83,15 +85,21 @@ license system — governs `scraper.py`/`gui.py` only and does NOT apply to
 `price_verifier/`.** It has its own README at `price_verifier/README.md`
 with its own architecture notes, its own `requirements.txt`, and its own
 `tests/`. Do not edit `price_verifier/` code using rules from this file;
-read its README first. As of this writing it is implemented and
-offline-tested but **not yet validated against live Amazon** — see that
-README's "Known gaps" section before treating its output as trustworthy.
+read its README first. v1 was tested live once (30 ASINs: column-name
+errors, ~10 min, high failure rate); v2 fixes all three (auto column
+detection + confirm screen, browser-grade fetching, three-pass pipeline
+with a Retry button) and is verified end-to-end against a local throttling
+fake-Amazon (`price_verifier/tests/sim_amazon.py`) — see that README's
+"Verification done so far" and "Known gaps" before treating live output
+as trustworthy.
 
 Windows only, for now (no macOS spec). `price_verifier_windows.spec` builds
 a single-file `.exe` via PyInstaller — no Cython step, no license gate (this
-tool has neither); the packaged build deliberately excludes
-selenium/undetected-chromedriver since the default run flow never launches
-a browser (see `fetcher/session_bootstrap.py`'s note in the README). Flask
+tool has neither). The build bundles curl_cffi (with its
+libcurl-impersonate) plus selenium/undetected-chromedriver for the Chrome
+fallback pass; Chrome itself must be installed on the vendor's machine
+for that pass, and the tool degrades to "Could Not Verify + Retry" without
+it. Flask
 templates ship as Python source (`price_verifier/templates_inline.py`, a
 Jinja `DictLoader`) rather than a `templates/` folder — this repo's own
 `gui.py` already avoids file-based Flask templates under PyInstaller for

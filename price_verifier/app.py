@@ -234,8 +234,11 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
         )
 
     try:
+        log.info("Run %s: starting %d rows (concurrency=%d, browser=%s)",
+                 run_id, len(items), run_cfg.concurrency, use_browser)
         # run_pipeline persists its own phase + stats_json to the DB.
         stats = asyncio.run(main())
+        log.info("Run %s: pipeline finished %s", run_id, json.dumps(stats.as_dict(), default=str))
         if stats.cancelled:
             checkpoint.mark_run_paused(run_id)
             final_status = "paused"

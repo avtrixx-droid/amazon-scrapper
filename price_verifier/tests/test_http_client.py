@@ -473,23 +473,6 @@ class HttpxTransportHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.html, "<html>oops</html>")
 
 
-class LegacyApiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fetch_product_page_still_works(self):
-        client = httpx.AsyncClient(
-            base_url="https://www.amazon.in",
-            transport=httpx.MockTransport(lambda req: httpx.Response(503, text="busy")),
-        )
-        r = await http_client.fetch_product_page(client, "B0LEGACY01")
-        await client.aclose()
-        self.assertEqual(r.error, "throttled_or_server_error")
-        self.assertEqual(r.html, "busy")
-
-    async def test_builders_return_clients(self):
-        for c in (http_client.build_anonymous_client(), http_client.build_client({"a": "b"}, "UA")):
-            self.assertIsInstance(c, httpx.AsyncClient)
-            await c.aclose()
-
-
 class HelperTests(unittest.TestCase):
     def test_cookie_domain(self):
         self.assertEqual(http_client._cookie_domain("www.amazon.in"), ".amazon.in")

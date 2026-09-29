@@ -1,235 +1,251 @@
 # Amazon Price Verification Tool
 
-Upload a CSV/XLSX of ASIN + expected price + brand, get back an Excel
-workbook — one sheet per brand, listing only the ASINs with a problem
-(price mismatch, out of stock, unavailable, or not found) — ready to
-forward straight to that brand's seller. Runs as a local Flask app;
-nothing leaves the machine except requests to amazon.in.
+Upload the vendor's CSV/XLSX price list, and get back an Excel workbook with
+one sheet per brand. Each sheet lists only the ASINs that have a problem:
+a price more than ₹1 off, out of stock, unavailable, no buy box, or not
+found. It is ready to forward straight to that brand's seller.
 
-This is a separate tool from the root repo's delivery-date scraper
-(`scraper.py`/`gui.py`) — different problem (price verification vs. delivery
-promises), different architecture (async plain-HTTP pipeline vs.
-Selenium/undetected-chromedriver per-row). See the root `CLAUDE.md`'s
-Folder Structure section for how the two coexist in this repo.
+It runs as a local Flask app (a double-click Windows `.exe`). Nothing leaves
+the machine except requests to amazon.in.
 
-## What changed after talking to the vendor
+This tool is separate from the root repo's delivery-date scraper
+(`scraper.py`/`gui.py`). The rules in the root `CLAUDE.md` for that tool
+(Selenium-only, pincode batching, the license system, Cython) do **not**
+apply here.
 
-The original build spec assumed pincode mattered and the output was a
-generic Matched/Mismatched/OOS/Failed set of sheets. Direct vendor
-feedback changed both:
+## What the vendor asked for
 
-- **Pincode is not a factor** — this catalog has the same price everywhere,
-  so there is no delivery-location session to set. This removed the
-  single biggest architectural risk from the original build (see "Before
-  this pivot" below) — the tool now fetches product pages with a plain,
-  anonymous HTTP client, no browser, no cookie jar, no session lifetime to
-  manage.
-- **Output is grouped by brand, issues only.** The vendor's actual workflow:
-  tally live Amazon price against what they agreed with a seller (e.g.
-  "Coco Blue"), and when it's wrong, email that seller the discrepancy. So
-  the workbook has one sheet per brand with only the problem rows —
-  correct prices aren't shown, because nobody needs to see them.
-- **Flag threshold: more than ₹1 deviation.** Exact match isn't required;
-  anything within ₹1 is left alone.
-- **Seller name matters as much as price** — the report tells you *who* is
-  showing the wrong price, since that's who gets the email.
-- **Speed still matters**: their existing tool takes ~4 hours for 1,000
-  ASINs. The async concurrent pipeline (unchanged by this pivot) targets
-  well under that.
+- **Flag any deviation of more than ₹1.** Anything within ₹1 is left alone.
+- **One sheet per brand, issues only.** Correct prices are not shown.
+- **Columns:** ASIN → expected price → price shown on Amazon, plus MRP and
+  seller, since the seller is who gets the email.
+- **Pincode is not a factor.** The same price applies everywhere, so there
+  is no delivery-location step.
+- **Fast.** Their existing tool takes about 4 hours per 1,000 ASINs.
 
-## Status: code-complete and packaged, NOT yet validated against live Amazon
+## v2 — fixes after the first live test (30 ASINs)
 
-Everything is implemented, packaged (Windows `.exe`, CI-built on every
-push — see "Packaging" below), and covered by `price_verifier/tests/` (76
-offline tests, no live network, no browser). Run the tests with:
+The first live run found three problems:
+
+- the column names in the vendor's sheet were rejected;
+- it took about 10 minutes for 30 ASINs;
+- most rows failed.
+
+The root cause of the failures and the slowness was the same. Amazon
+soft-blocks a cookieless client whose TLS fingerprint is not a browser's.
+The v1 retry loop then kept retrying on the same flagged identity, sleeping
+between attempts, and never recovered. v2 fixes this at every layer.
+
+### 1. Automatic column detection with a confirmation step (`ingest/column_detect.py`)
+
+After upload, the tool works out which column is which. It uses the header
+names (synonyms such as "ASIN No.", "Amazon Link", "SP", "Selling Price (Rs.)",
+"Brand Name") and, above all, the **contents** of each column: which one
+holds ASINs or amazon.in links, and which one holds prices. It also skips
+title rows above the header, and picks the right sheet in a multi-sheet
+workbook.
+
+The **mapping screen** shows the guess, a preview of the file and a dropdown
+for each field. Only after the user confirms does it show a summary (rows
+ready, rows skipped and why), and only then does checking start. Details:
+
+- ASINs can be given as bare ASINs or as any amazon.in product link.
+- Prices can be written as `₹1,499`, `Rs. 1499/-`, `1499.00`, and so on.
+- Duplicate ASINs are skipped, with the reason shown.
+- The brand column is optional. Without one, the brand shown on Amazon is
+  used for grouping.
+
+### 2. Fetching like a real browser (`fetcher/http_client.py`)
+
+`FetchSession` uses `curl_cffi` to impersonate Chrome's TLS and HTTP/2
+fingerprint, so the request looks like a real browser to Amazon.
+
+- **Warm-up:** each identity first loads the home page, the way a person
+  would, and gets real session cookies. It also sets `i18n-prefs=INR` and
+  `lc-acbin=en_IN`.
+- **Rotation:** a blocked identity is never reused. `rotate()` switches to a
+  fresh cookie jar and a fresh fingerprint.
+- **Fallback:** httpx is used only if curl_cffi cannot load.
+
+### 3. A three-pass pipeline that aims for zero failures (`pipeline/runner.py`)
+
+| Pass | What | Why |
+|---|---|---|
+| 1. Fast | Shared session, requests paced by an **AIMD rate limiter** (`pipeline/rate_limiter.py`): it speeds up slowly while things go well, halves on a block, pauses globally, and rotates identity **once per block event** | Most rows finish here |
+| 2. Recovery | A fresh identity after a short pause, at a slow fixed rate | Rows that were rate-limited in pass 1 |
+| 3. Browser | Real Chrome through undetected-chromedriver, one row at a time (`fetcher/browser_fallback.py`) | Rows plain HTTP still could not settle (or ambiguous pages) |
+
+Only rows that survive all three passes end as **Could Not Verify**. The
+results page then shows a **Retry** button that re-checks just those rows
+and updates the same report. A permanent answer is never re-fetched; that
+includes matched, mismatched, out of stock, unavailable, not found and no
+buy box.
+
+Pass 3 needs Google Chrome installed on the machine. If Chrome is not there,
+pass 3 is skipped, and those rows become retryable Could-Not-Verify rows
+rather than wrong answers. The first Chrome run downloads a matching
+chromedriver into `data/uc_cache`.
+
+### 4. Parser accuracy (`fetcher/parser.py`)
+
+The price and MRP are read only from the core price and buy-box containers,
+never from anywhere on the page. That means carousel prices, "frequently
+bought together" prices and review text cannot leak in. The parser also
+reads the brand (from the byline) and the seller. It detects "no featured
+offer" pages (a "See All Buying Options" page with no buy box) and gives
+them their own status instead of reporting "no price".
+
+When the parser cannot understand a page, it saves the page to
+`data/debug_html/` so the problem can be investigated (pruned after 7 days).
+
+### 5. Progress, pause and resume
+
+The progress page shows the current pass, the live rate and an ETA. When
+Amazon asks the tool to slow down, the page says so and counts down to
+resuming.
+
+**Pause** stops cleanly. Every finished row is already saved to SQLite (WAL
+mode, write-through per row), and the home page offers **Resume**. A crash
+or power cut is recovered the same way. Existing databases from v1 are
+migrated in place; the migration only ever adds columns.
+
+## Verification done so far
+
+The build sandbox cannot reach amazon.in. Instead, `tests/sim_amazon.py` is
+a local fake amazon.in that reproduces the failure seen in the live test.
+Its throttle model:
+
+- serves realistic 150–200 KB product pages, including decoy carousel,
+  strike-through and review prices;
+- flags an identity after a short burst and returns the 503 "Sorry!
+  Something went wrong!" robot page to it from then on;
+- enforces a per-IP ceiling across all identities.
+
+Results against it:
+
+| Check | Result |
+|---|---|
+| `test_e2e_sim` — 40 ASINs, realistic throttle, production request rates | **0 failed**, all prices, MRPs, sellers, brands and statuses correct; well under a minute |
+| `test_e2e_sim` — 30 ASINs, harsh throttle (tiny bursts, 3 req/s IP ceiling) | **0 failed**; blocks happen and are absorbed by rotation and the recovery pass |
+| Benchmark (`PV_SIM_BENCH=1`) — 300 ASINs, full production timings | **0 failed**, 147 s (about 120 ASINs/min, so about 8 min per 1,000; the vendor's tool takes 4 h) |
+| Frozen PyInstaller binary: upload → auto-map → run → download | 40 ASINs in about 19 s, 0 failed; confirms curl_cffi is bundled correctly |
+| Retry flow: an ASIN blocked permanently, then unblocked | Ends as Could Not Verify, then Retry resolves it and the report updates |
+
+The real site's limits are unknown until the vendor's next live test. The
+throttle model is an informed guess based on the first run. If the live
+rate is lower, the AIMD limiter backs off on its own, and the recovery and
+Chrome passes pick up the rest.
+
+The whole suite (`tests/`, 336 tests) runs offline:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -r price_verifier/requirements.txt
-python -m unittest discover -s price_verifier/tests -p "test_*.py"
+python -m unittest discover -s price_verifier/tests -t .
+PV_SIM_BENCH=1 python -m unittest price_verifier.tests.test_e2e_sim   # + 300-ASIN benchmark
 ```
 
-What's not yet proven is whether the selectors in `fetcher/parser.py` — and
-the plain-HTTP fetch itself — actually work against a live amazon.in
-response. This was built in a sandboxed environment with outbound access
-to amazon.in blocked at the network-policy level (confirmed via a direct
-CONNECT test, not a code issue), so none of this could be tested live here.
+To try the full app against the simulator by hand:
 
-**Before trusting this tool's output, run it against 20-30 real ASINs on a
-machine with normal internet access and manually check the numbers.** This
-is a much smaller ask than the original build's "Phase 0" spike — dropping
-the pincode requirement means there's no session/cookie lifetime question
-left to investigate, just: does the plain HTTP GET return the same HTML
-shape the selectors expect (see "Known gaps" below), and does Amazon's
-bot-defense allow a sustained run at the chosen concurrency.
-
-What *has* been verified in this sandbox, despite no route to amazon.in:
-the packaged `.exe` was built and run (as a Linux binary from the same
-spec — PyInstaller doesn't cross-compile, so this doesn't prove the
-Windows build works bit-for-bit, but it exercises the same import graph,
-data bundling, and frozen-path logic) all the way through a real upload →
-pipeline run → Excel download, including the actual network-failure path
-(this sandbox's outbound block was classified correctly, retried per
-policy, and landed in the "Could Not Verify" sheet exactly as designed —
-see git history for the transcript). What that run could NOT exercise is
-the one thing that matters most: whether `fetcher/parser.py`'s selectors
-match what amazon.in actually returns.
+```bash
+python -m price_verifier.tests.sim_amazon --port 8765 --asins 300   # writes sim_batch.csv
+PV_MARKETPLACE_BASE_URL=http://127.0.0.1:8765 PV_DATA_DIR=/tmp/pvdata python -m price_verifier.app
+```
 
 ### Known gaps
 
-- **Selectors in `fetcher/parser.py`** — ported from `scraper.py`'s
-  `extract_price`/`extract_mrp`/`extract_availability`/`extract_seller`
-  (proven against live Amazon via Selenium's live DOM), adapted to read the
-  same CSS-addressable nodes out of *static* HTML from a plain GET. Should
-  work — `.a-offscreen` price spans and `#merchant-info` are server-rendered,
-  not JS-injected — but unverified against a real response.
-- **Bot-defense at the TLS/header level** — `httpx[http2]` is a real
-  browser-like stack but doesn't impersonate Chrome's exact TLS
-  fingerprint. If Amazon's bot-defense fingerprints at that layer, expect
-  elevated block rates even on an otherwise well-formed request; the
-  fallback is `curl_cffi` (impersonates Chrome's TLS handshake) — not
-  wired in yet, add it to `fetcher/http_client.py` if a live test run
-  shows unexpected block rates.
-- **"Lowest price across all sellers"** (`config.DEFAULT_PRICE_SOURCE = "lowest"`)
-  — not implemented. A product page only ever exposes the Buy Box price;
-  this would need the separate `/gp/offer-listing/{asin}` page.
-- **Pincode session bootstrap** (`fetcher/session_bootstrap.py`) — kept in
-  the codebase but unused by the default flow now that pincode doesn't
-  matter for this vendor, and explicitly excluded from the packaged build
-  (see "Packaging" below). If a future batch genuinely needs a
-  per-pincode price, this is where that logic would plug back in; it was
-  validated in concept (ported from this repo's proven
-  `scraper.py::set_pincode()`) but never exercised end-to-end.
+- **"Lowest price across all sellers"** (`DEFAULT_PRICE_SOURCE = "lowest"`)
+  is not implemented. A product page only shows the Buy Box price, so this
+  would need the `/gp/offer-listing/` page.
+- **The Chrome pass has never run against a real Chrome here.** The
+  sandbox's Chromium and chromedriver versions do not match. It is covered
+  by tests using a fake driver, and it only handles rows the HTTP passes
+  could not settle.
 
-## Open questions still pending team confirmation
+## Tunables
 
-| Question | Current default |
-|---|---|
-| Buy Box price vs. lowest across sellers | Buy Box (`config.DEFAULT_PRICE_SOURCE`) |
-| Marketplace | amazon.in only (`config.MARKETPLACE_BASE_URL`) |
+All tunables are in `config.py`:
 
-Resolved by the vendor: match tolerance is ±₹1 (flag anything more),
-pincode does not need to be set per batch or per row, Windows only (no
-macOS build), and `DEFAULT_CONCURRENCY = 15` is fine without a benchmark
-for now.
+- `DEFAULT_CONCURRENCY = 15`, which can be changed per run on the confirm
+  screen;
+- ₹1 tolerance;
+- the rate-limiter and pass settings (`FAST_*`, `RATE_*`, `BLOCK_PAUSE_*`,
+  `RECOVERY_*`, `BROWSER_*`).
 
-## Packaging
+Environment overrides, used for tests and the simulator:
+
+- `PV_MARKETPLACE_BASE_URL`
+- `PV_DATA_DIR`, which relocates the DB, uploads, output and debug pages
+- `PV_CHROME_BINARY`
+
+## Output workbook
+
+- **Overview** has one row per brand: ASINs, Price OK, Price Mismatch,
+  Listing Issue, Could Not Verify, and Needs Action.
+- **One sheet per brand** holds that brand's issue rows only, with these
+  columns:
+  - ASIN
+  - Expected Price (₹)
+  - Price on Amazon (₹)
+  - Difference (₹)
+  - MRP (₹)
+  - Seller
+  - Product Title
+  - Status
+  - Note
+  - Amazon Link (clickable)
+  - Checked At
+- **Could Not Verify** lists rows that could not be checked, with a plain
+  English reason. Use Retry in the app to re-check them.
+- **Run Info** shows how the run went: passes, blocks, the rate reached and
+  the duration.
+- **Per-brand download.** The results page also offers a single-brand
+  workbook sized to attach to an email.
+
+Cell text is sanitized against Excel formula injection.
+
+## Packaging (Windows)
 
 `price_verifier_windows.spec` (repo root) builds a single-file
-`PriceVerificationTool.exe` via PyInstaller — Windows only, per the
-vendor. Two things worth knowing if you're touching this:
+`PriceVerificationTool.exe`:
 
-- **No Cython, no license gate.** Unlike the root `amazon_scraper_windows.spec`,
-  this tool has neither an anti-reverse-engineering build step nor a
-  license server to authorize against — the spec is a plain Analysis →
-  PYZ → EXE onefile build.
-- **selenium/undetected-chromedriver are excluded from the bundle** even
-  though they're in `requirements.txt` (for `fetcher/session_bootstrap.py`,
-  unused by default — see "Known gaps"). Bundling a real Chrome +
-  chromedriver pair for a code path nothing calls would only bloat the
-  exe; if that path becomes load-bearing later, packaging it is separate
-  work.
-- **Templates ship as Python source, not a data folder.** See
-  `templates_inline.py` — this sidesteps the whole class of "Flask can't
-  find its templates once frozen" bugs by reusing the same trick this
-  repo's own `gui.py` already relies on (`render_template_string` /
-  no file-based templates under PyInstaller), rather than inventing a new,
-  unverified mechanism (bundling `templates/` as PyInstaller `datas` and
-  computing a frozen-aware `template_folder`).
-- **Data directory (SQLite DB, uploads, output) lives next to the .exe**
-  when frozen (`config.py`'s `_get_base_dir()`), not inside the PyInstaller
-  bundle — the bundle is either read-only in spirit (onedir) or a temp dir
-  wiped after every run (onefile), so writing there would either fail or
-  silently lose data between runs.
+- It collects curl_cffi (including its bundled libcurl-impersonate),
+  selectolax's compiled parser, certifi, undetected-chromedriver and
+  selenium.
+- There is no Cython step and no license gate.
+- Templates ship as Python source (`templates_inline.py`), so there is no
+  template folder that a frozen build could fail to find.
+- When frozen, the data directory is created next to the `.exe`.
 
-**CI**: `.github/workflows/price_verifier_build.yml` builds on
-`windows-latest` on every push that touches `price_verifier/**` or the
-spec (any branch, not just main — "ready right after commit"), running the
-offline test suite as a gate before building, and uploads the `.exe` as a
-downloadable workflow artifact. `build_price_verifier_windows.bat` is the
-local equivalent.
-
-**Verified in this sandbox** (Linux, so not a Windows-bit-for-bit proof,
-but it does exercise the same PyInstaller Analysis/bundling logic — see
-"Status" above): the spec builds cleanly, all hidden imports resolve
-(including `selectolax`'s compiled extension and `certifi`'s CA bundle,
-both easy to get wrong), and the frozen binary correctly serves the UI,
-writes its SQLite DB next to itself, and produces a valid, correctly
-per-brand-grouped `.xlsx` after a full upload → run → download cycle.
-**Not verified**: an actual Windows build (needs a Windows runner — CI
-will do this on the next push), and anything downstream of a real Amazon
-response.
-
-## Running it
-
-From source:
-
-```bash
-pip install -r price_verifier/requirements.txt
-python -m price_verifier.app
-```
-
-Or grab the built `.exe` from the latest successful run of
-`.github/workflows/price_verifier_build.yml` (Actions tab → that workflow
-→ latest run → Artifacts) and just double-click it — no Python install
-needed on the target machine.
-
-Either way, opens `http://127.0.0.1:5001/` in your browser. Upload a
-CSV/XLSX with `asin`, `expected_price`, and `brand` columns
-(case-insensitive, tolerant of extra whitespace), confirm the settings,
-and it runs — no pincode prompt, no browser launch.
-
-### Input format
-
-| Column | Required | Notes |
-|---|---|---|
-| `asin` | Yes | 10 characters, starts with `B` |
-| `expected_price` | Yes | Numeric; `₹`, commas, and whitespace are stripped automatically |
-| `brand` | Yes | Groups the output into one sheet per brand |
-| `pincode` | No | Accepted if present, never used |
-
-### Output
-
-- **Overview** — one row per brand: total ASINs, matched, mismatched, out
-  of stock / unavailable / not found, could-not-verify, and an "issues"
-  count.
-- **One sheet per brand** — only rows with an issue. Columns: ASIN,
-  Product Title, Seller, Expected Price, Amazon Price, MRP, Difference,
-  Status, URL, Checked At. Price-mismatch rows are highlighted.
-- **Could Not Verify** — ASINs that failed to scrape after retries (not a
-  pricing issue, just "we couldn't check this one"), with the error reason.
-- **Per-brand download** — the results page also links a small
-  single-sheet workbook per brand (same columns, that brand only) sized
-  to attach directly to an email, without extracting a sheet from the
-  full workbook first.
+**CI:** `.github/workflows/price_verifier_build.yml` runs on `windows-latest`
+on every push that touches `price_verifier/**` or the spec, on any branch.
+It runs the test suite as a gate, builds the `.exe`, and uploads it as the
+`PriceVerificationTool-Windows` artifact. To download it: Actions tab →
+latest run → Artifacts. `build_price_verifier_windows.bat` is the local
+equivalent.
 
 ## Layout
 
 ```
-(repo root)
-├── price_verifier_windows.spec      PyInstaller spec — Windows only, onefile
-├── build_price_verifier_windows.bat Local build script (mirrors the CI workflow's steps)
-└── .github/workflows/
-    └── price_verifier_build.yml     Builds + tests on windows-latest, uploads .exe artifact on every push
-
 price_verifier/
-├── app.py                    Flask UI — upload/confirm/progress/results/history; frozen-build startup log + error dialog
-├── config.py                 Defaults for run settings, fixed system limits, frozen-aware writable BASE_DIR
-├── templates_inline.py       Jinja templates as Python source (DictLoader) — no templates/ data folder to bundle
+├── app.py                    Flask UI: upload → column mapping → confirm → progress (pause) → results (retry) → history
+├── config.py                 Run defaults, pipeline tunables, frozen-aware data dir (+ PV_DATA_DIR)
+├── templates_inline.py       Jinja templates as Python source (DictLoader)
+├── ingest/
+│   ├── column_detect.py      load_table / detect_columns / parse_rows — content + header based column detection
+│   └── input_parser.py       ParsedRow / ParseReport / InputValidationError (+ parse_upload wrapper)
 ├── fetcher/
-│   ├── parser.py             ALL Amazon HTML selectors live here (one-file fix on layout drift)
-│   ├── http_client.py        Async httpx client — build_anonymous_client() is the default fetch path
-│   ├── session_bootstrap.py  Pincode session bootstrap — kept but unused by default, excluded from the packaged build
-│   └── models.py             FetchResult / ParsedProduct (now carries mrp + seller)
+│   ├── http_client.py        FetchSession: curl_cffi Chrome impersonation, warm-up, rotate(); never raises
+│   ├── browser_fallback.py   BrowserFetcher: real Chrome via undetected-chromedriver (pass 3)
+│   ├── parser.py             ALL Amazon HTML selectors (scoped to price / buy-box containers)
+│   ├── debug_dump.py         Saves unparseable pages to data/debug_html (7-day prune)
+│   └── models.py             FetchResult / ParsedProduct
 ├── pipeline/
-│   ├── runner.py             classify() (status + retryable) + the per-row retry loop
-│   ├── compare.py            Pure tolerance-matching logic (±₹1 default)
-│   ├── circuit_breaker.py    Consecutive-failure trip -> cooldown + concurrency cut
-│   └── worker_pool.py        DynamicGate (resizable concurrency) + PauseGate (cooldown)
+│   ├── runner.py             classify() + three-pass pipeline (fast / recovery / browser)
+│   ├── rate_limiter.py       AdaptiveRateLimiter (AIMD + escalating block pauses)
+│   └── compare.py            Tolerance matching (±₹1)
 ├── storage/
-│   ├── db.py                 SQLite schema (WAL mode) — run_items carries brand/mrp/seller
-│   └── checkpoint.py         Per-row write-through, resume query, run counts, brand-issue lookup
-├── excel/report.py           build_report() (full, per-brand sheets) + build_brand_report() (single-brand email export); sanitizes cell text against formula injection
-├── ingest/input_parser.py    CSV/XLSX upload validation (asin, expected_price, brand required)
-└── tests/                    77 offline tests — fixtures, no network, no browser
+│   ├── db.py                 SQLite schema (WAL) + add-column-only migration
+│   └── checkpoint.py         Per-row write-through, resume / pause / retry, per-brand issue counts
+├── excel/report.py           Full report + single-brand export
+└── tests/                    Offline suite + sim_amazon.py (fake amazon.in) + test_e2e_sim.py
 ```

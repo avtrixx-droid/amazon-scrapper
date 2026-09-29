@@ -35,6 +35,7 @@ jobs:
           pip install pyinstaller pyinstaller-hooks-contrib
 
       - name: Run offline test suite (build gate)
+        timeout-minutes: 20   # includes the fake-Amazon end-to-end runs (~1 min)
         run: python -m unittest discover -s price_verifier/tests -p "test_*.py"
 
       - name: Build .exe

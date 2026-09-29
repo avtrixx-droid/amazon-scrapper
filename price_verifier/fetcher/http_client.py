@@ -46,13 +46,8 @@ Both backends:
   simulators must be reached directly even if HTTP(S)_PROXY is set and
   NO_PROXY isn't.
 
-Concurrency is bounded by the caller (pipeline/worker_pool.py), not here;
-retry policy lives in the pipeline. This module does exactly one attempt
-per ``fetch()`` call.
-
-The module-level ``build_anonymous_client`` / ``build_client`` /
-``fetch_product_page`` helpers are the pre-FetchSession API, kept only
-until the pipeline finishes migrating to FetchSession.
+Concurrency and retry policy live in the caller (pipeline/runner.py), not
+here. This module does exactly one attempt per ``fetch()`` call.
 """
 
 from __future__ import annotations
@@ -347,6 +342,7 @@ class FetchSession:
                 if warm_up:
                     await self._warm_up(ident)
                 self._identity = ident
+                log.info("FetchSession ready: backend=%s target=%s", ident.backend, ident.target)
         except Exception:
             log.warning("FetchSession.start failed", exc_info=True)
 
@@ -514,55 +510,3 @@ def _safe_text(resp) -> str | None:
         except Exception:
             return None
 
-
-# ── Legacy API (pre-FetchSession) — kept until the pipeline migration lands ──
-_DEFAULT_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": ACCEPT_LANGUAGE,
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-}
-
-_DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-)
-
-
-def build_anonymous_client(user_agent: str = _DEFAULT_USER_AGENT) -> httpx.AsyncClient:
-    """Legacy: no cookie jar, no prior session. Superseded by FetchSession."""
-    headers = dict(_DEFAULT_HEADERS)
-    headers["User-Agent"] = user_agent
-    return httpx.AsyncClient(
-        base_url=config.MARKETPLACE_BASE_URL,
-        headers=headers,
-        timeout=config.REQUEST_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        http2=True,
-    )
-
-
-def build_client(cookies: dict[str, str], user_agent: str) -> httpx.AsyncClient:
-    """Legacy cookie-jar replay variant (session_bootstrap). Superseded by FetchSession."""
-    headers = dict(_DEFAULT_HEADERS)
-    headers["User-Agent"] = user_agent
-    return httpx.AsyncClient(
-        base_url=config.MARKETPLACE_BASE_URL,
-        headers=headers,
-        cookies=cookies,
-        timeout=config.REQUEST_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        http2=True,
-    )
-
-
-async def fetch_product_page(client: httpx.AsyncClient, asin: str) -> FetchResult:
-    """Legacy single fetch attempt on a caller-owned httpx client. Never raises."""
-    started = time.perf_counter()
-    try:
-        resp = await client.get(f"/dp/{asin}")
-    except Exception as exc:
-        return FetchResult(asin=asin, status_code=None, html=None,
-                           error=_map_httpx_exception(exc), elapsed_ms=_ms_since(started))
-    return _map_status(asin, resp.status_code, _safe_text(resp), _ms_since(started), "http")
