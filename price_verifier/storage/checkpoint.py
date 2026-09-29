@@ -6,12 +6,19 @@ purpose: the pipeline calls `mark_item_result` once per completed row, from
 whichever asyncio task finished it, with no batching. That per-row write IS
 the crash-safety guarantee the spec asks for — there is no separate
 "checkpoint every N rows" step to forget to call.
+
+Row lifecycle: a row is 'pending' until the pipeline finalizes it exactly
+once per pipeline pass with mark_item_result. While it is being retried,
+record_attempt() bumps its attempt counter and note_item_attempt_failure()
+stores the latest error — both leave the status alone, so a crash mid-run
+still leaves a diagnostic on the row and resume still re-queues it.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -25,6 +32,7 @@ STATUS_MISMATCHED = "mismatched"
 STATUS_OUT_OF_STOCK = "out_of_stock"
 STATUS_UNAVAILABLE = "unavailable"
 STATUS_NOT_FOUND = "not_found"
+STATUS_NO_FEATURED_OFFER = "no_featured_offer"  # product exists, but no buy-box winner ("See All Buying Options")
 STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = {
@@ -33,7 +41,36 @@ TERMINAL_STATUSES = {
     STATUS_OUT_OF_STOCK,
     STATUS_UNAVAILABLE,
     STATUS_NOT_FOUND,
+    STATUS_NO_FEATURED_OFFER,
 }
+
+# Statuses counted in the runs.out_of_stock bucket (and the UI's "OOS /
+# unavailable" tally): the listing can't be bought at a price right now.
+OUT_OF_STOCK_BUCKET = (STATUS_OUT_OF_STOCK, STATUS_UNAVAILABLE, STATUS_NOT_FOUND, STATUS_NO_FEATURED_OFFER)
+
+# Which fetch path produced a row's final answer (run_items.resolved_by).
+RESOLVED_BY_HTTP = "http"
+RESOLVED_BY_RECOVERY = "recovery"
+RESOLVED_BY_BROWSER = "browser"
+
+UNKNOWN_BRAND = "Unknown Brand"
+
+
+def effective_brand(row: dict) -> str:
+    """Brand a row is grouped under: the uploaded brand if non-blank, else
+    the brand read off the product page, else "Unknown Brand". Brand is
+    optional at upload, so this is what the report/sheets/downloads should
+    key on. Kept consistent with _EFFECTIVE_BRAND_SQL (same trimming)."""
+    for key in ("brand", "scraped_brand"):
+        val = row.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return UNKNOWN_BRAND
+
+
+_EFFECTIVE_BRAND_SQL = (
+    f"COALESCE(NULLIF(TRIM(brand), ''), NULLIF(TRIM(scraped_brand), ''), '{UNKNOWN_BRAND}')"
+)
 
 
 def _now() -> str:
@@ -44,7 +81,7 @@ def _now() -> str:
 class RunItemRow:
     asin: str
     expected_price: float
-    brand: str = ""  # required for create_run's initial insert; unused/unset on resume reads
+    brand: str = ""  # uploaded brand; optional (may be blank) — see effective_brand()
     actual_price: Optional[float] = None
     mrp: Optional[float] = None
     seller: Optional[str] = None
@@ -89,7 +126,7 @@ def create_run(run_cfg: RunConfig, items: list[RunItemRow], db_path: Path = conf
             conn.executemany(
                 """INSERT INTO run_items (run_id, asin, brand, expected_price, status)
                    VALUES (?, ?, ?, ?, 'pending')""",
-                [(run_id, it.asin, it.brand, it.expected_price) for it in items],
+                [(run_id, it.asin, (it.brand or "").strip(), it.expected_price) for it in items],
             )
             conn.execute("COMMIT")
         except Exception:
@@ -106,32 +143,60 @@ def get_pending_and_retryable_items(
     never re-queued — that's what makes resume "only pending and failed
     rows" per the spec, not a full re-run.
 
-    Unlike the in-run retry cap (MAX_ATTEMPTS, enforced by the runner's own
-    loop within a single processing pass), a resume is a deliberate user
-    action each time, so a failed row always gets a fresh attempt budget on
-    resume rather than being permanently capped by a lifetime attempts count
-    — `attempts` here is a reporting figure (spec's Failed-sheet column),
-    not a gate.
+    A resume / retry is a deliberate user action each time, so a failed row
+    always gets a fresh attempt budget rather than being permanently capped
+    by a lifetime attempts count — `attempts` is a reporting figure, not a
+    gate.
     """
     with get_conn(db_path) as conn:
         rows = conn.execute(
-            """SELECT asin, expected_price, attempts FROM run_items
+            """SELECT asin, expected_price, brand, attempts FROM run_items
                WHERE run_id = ? AND status IN ('pending', 'failed')
                ORDER BY asin""",
             (run_id,),
         ).fetchall()
-    return [RunItemRow(asin=r["asin"], expected_price=r["expected_price"], attempts=r["attempts"]) for r in rows]
+    return [
+        RunItemRow(asin=r["asin"], expected_price=r["expected_price"], brand=r["brand"] or "", attempts=r["attempts"])
+        for r in rows
+    ]
+
+
+def reopen_run_for_retry(run_id: str, db_path: Path = config.DB_PATH) -> list[RunItemRow]:
+    """Backs a "Retry failed rows" button: flips a finished run back to
+    'running' (so a crash mid-retry is picked up by find_incomplete_run) and
+    returns the rows to re-process — the same pending + failed set a resume
+    uses. Terminal answers are never re-fetched. Call finish_run() after the
+    pipeline completes, exactly as for a fresh run."""
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE runs SET status='running', finished_at=NULL, phase=NULL WHERE run_id=?",
+            (run_id,),
+        )
+    return get_pending_and_retryable_items(run_id, db_path=db_path)
 
 
 def record_attempt(run_id: str, asin: str, db_path: Path = config.DB_PATH) -> None:
     """Bump the attempts counter for one fetch try. Called once per actual
-    HTTP attempt (success or failure alike) — separate from mark_item_result
+    fetch attempt (success or failure alike) — separate from mark_item_result
     so a row's attempts count reflects real tries made, not just how many
     times the row transitioned status."""
     with get_conn(db_path) as conn:
         conn.execute(
-            "UPDATE run_items SET attempts = attempts + 1 WHERE run_id = ? AND asin = ?",
-            (run_id, asin),
+            "UPDATE run_items SET attempts = attempts + 1, last_attempt_at = ? WHERE run_id = ? AND asin = ?",
+            (_now(), run_id, asin),
+        )
+
+
+def note_item_attempt_failure(run_id: str, asin: str, error_reason: str, db_path: Path = config.DB_PATH) -> None:
+    """Record why the latest attempt failed WITHOUT finalizing the row: the
+    status is left as-is, so a crash mid-run still leaves a diagnostic on
+    every row that was being retried, and resume still re-queues it. Never
+    touches a row that already reached a terminal status."""
+    with get_conn(db_path) as conn:
+        conn.execute(
+            """UPDATE run_items SET error_reason = ?, last_attempt_at = ?
+               WHERE run_id = ? AND asin = ? AND status IN ('pending', 'failed')""",
+            (error_reason, _now(), run_id, asin),
         )
 
 
@@ -146,17 +211,22 @@ def mark_item_result(
     url: Optional[str] = None,
     error_reason: Optional[str] = None,
     db_path: Path = config.DB_PATH,
+    scraped_brand: Optional[str] = None,
+    resolved_by: Optional[str] = None,
 ) -> None:
-    """Write-through the instant a row reaches a terminal status for this
+    """Write-through the instant a row reaches its final status for this
     processing pass. Does NOT touch `attempts` — call record_attempt()
-    separately for each fetch try; this only sets the final outcome."""
+    separately for each fetch try; this only sets the final outcome.
+    `resolved_by` is which fetch path produced the answer (RESOLVED_BY_*);
+    `scraped_brand` is the brand read off the product page, if any."""
     with get_conn(db_path) as conn:
         conn.execute(
             """UPDATE run_items
                SET status = ?, actual_price = ?, mrp = ?, seller = ?, product_title = ?, url = ?,
-                   error_reason = ?, checked_at = ?
+                   error_reason = ?, checked_at = ?, scraped_brand = ?, resolved_by = ?
                WHERE run_id = ? AND asin = ?""",
-            (status, actual_price, mrp, seller, product_title, url, error_reason, _now(), run_id, asin),
+            (status, actual_price, mrp, seller, product_title, url, error_reason, _now(),
+             scraped_brand, resolved_by, run_id, asin),
         )
         # Recompute counts from run_items rather than incrementing blindly —
         # a row retried across a resume (failed -> matched) must not double-count.
@@ -164,19 +234,46 @@ def mark_item_result(
 
 
 def _recompute_run_counts(conn, run_id: str) -> None:
+    oos_placeholders = ",".join("?" * len(OUT_OF_STOCK_BUCKET))
     counts = conn.execute(
-        """SELECT
+        f"""SELECT
              SUM(CASE WHEN status = 'matched' THEN 1 ELSE 0 END) AS matched,
              SUM(CASE WHEN status = 'mismatched' THEN 1 ELSE 0 END) AS mismatched,
-             SUM(CASE WHEN status IN ('out_of_stock','unavailable','not_found') THEN 1 ELSE 0 END) AS oos,
+             SUM(CASE WHEN status IN ({oos_placeholders}) THEN 1 ELSE 0 END) AS oos,
              SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
            FROM run_items WHERE run_id = ?""",
-        (run_id,),
+        (*OUT_OF_STOCK_BUCKET, run_id),
     ).fetchone()
     conn.execute(
         """UPDATE runs SET matched=?, mismatched=?, out_of_stock=?, failed=? WHERE run_id=?""",
         (counts["matched"] or 0, counts["mismatched"] or 0, counts["oos"] or 0, counts["failed"] or 0, run_id),
     )
+
+
+def set_run_phase(run_id: str, phase: str, db_path: Path = config.DB_PATH) -> None:
+    """Which pass the pipeline is in (fast | recovery | browser | done |
+    cancelled) — lets the UI/history show it, and survives a restart."""
+    with get_conn(db_path) as conn:
+        conn.execute("UPDATE runs SET phase=? WHERE run_id=?", (phase, run_id))
+
+
+def set_run_stats(run_id: str, stats: dict, db_path: Path = config.DB_PATH) -> None:
+    """Persist the runner's RunStats (as a dict) for the report summary /
+    history page. Overwritten by each pipeline invocation over the run
+    (a retry pass replaces the original pass's stats)."""
+    with get_conn(db_path) as conn:
+        conn.execute("UPDATE runs SET stats_json=? WHERE run_id=?", (json.dumps(stats, default=str), run_id))
+
+
+def get_run_stats(run_id: str, db_path: Path = config.DB_PATH) -> Optional[dict]:
+    with get_conn(db_path) as conn:
+        row = conn.execute("SELECT stats_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None or not row["stats_json"]:
+        return None
+    try:
+        return json.loads(row["stats_json"])
+    except ValueError:
+        return None
 
 
 def finish_run(run_id: str, output_path: Optional[str], db_path: Path = config.DB_PATH) -> None:
@@ -220,6 +317,8 @@ def get_run(run_id: str, db_path: Path = config.DB_PATH) -> Optional[dict]:
 
 
 def get_run_items(run_id: str, status: Optional[str] = None, db_path: Path = config.DB_PATH) -> list[dict]:
+    """Row dicts, each with an extra computed "effective_brand" key (see
+    effective_brand()) so callers don't re-derive the grouping."""
     with get_conn(db_path) as conn:
         if status:
             rows = conn.execute(
@@ -229,25 +328,33 @@ def get_run_items(run_id: str, status: Optional[str] = None, db_path: Path = con
             rows = conn.execute(
                 "SELECT * FROM run_items WHERE run_id = ? ORDER BY asin", (run_id,)
             ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["effective_brand"] = effective_brand(d)
+        out.append(d)
+    return out
 
 
 # Statuses that represent a genuine pricing/listing problem worth emailing a
 # seller about — distinct from STATUS_FAILED, which just means "we couldn't
 # check this one," not "there's a discrepancy." Excel report + per-brand
 # downloads both key off this set.
-ISSUE_STATUSES = (STATUS_MISMATCHED, STATUS_OUT_OF_STOCK, STATUS_UNAVAILABLE, STATUS_NOT_FOUND)
+ISSUE_STATUSES = (
+    STATUS_MISMATCHED, STATUS_OUT_OF_STOCK, STATUS_UNAVAILABLE, STATUS_NOT_FOUND, STATUS_NO_FEATURED_OFFER,
+)
 
 
 def get_brands_with_issues(run_id: str, db_path: Path = config.DB_PATH) -> list[str]:
-    """Distinct brands that have at least one issue row, alphabetical —
-    drives the per-brand download links on the results page."""
+    """Distinct EFFECTIVE brands (see effective_brand()) that have at least
+    one issue row, alphabetical — drives the per-brand download links on the
+    results page."""
     placeholders = ",".join("?" * len(ISSUE_STATUSES))
     with get_conn(db_path) as conn:
         rows = conn.execute(
-            f"""SELECT DISTINCT brand FROM run_items
+            f"""SELECT DISTINCT {_EFFECTIVE_BRAND_SQL} AS eb FROM run_items
                 WHERE run_id = ? AND status IN ({placeholders})
-                ORDER BY brand COLLATE NOCASE""",
+                ORDER BY eb COLLATE NOCASE""",
             (run_id, *ISSUE_STATUSES),
         ).fetchall()
-    return [r["brand"] for r in rows]
+    return [r["eb"] for r in rows]

@@ -69,22 +69,64 @@ MARKETPLACE_BASE_URL = os.environ.get("PV_MARKETPLACE_BASE_URL", "https://www.am
 # browser dependency, no cookie/session lifetime to manage.
 PINCODE_IS_A_FACTOR = False
 
-# ── Retry / resilience ─────────────────────────────────────────────────────
-MAX_ATTEMPTS = 3
-RETRY_BASE_DELAY_SECONDS = 2.0
+# ── Fetching ───────────────────────────────────────────────────────────────
 REQUEST_TIMEOUT_SECONDS = 20.0
 
-# Circuit breaker: consecutive failures across the whole run (not per-row)
-# before concurrency is cut and a cooldown is triggered.
-CIRCUIT_BREAKER_THRESHOLD = 8
-CIRCUIT_BREAKER_COOLDOWN_SECONDS = 60
-CIRCUIT_BREAKER_MAX_COOLDOWN_SECONDS = 600
+# ── Multi-pass pipeline (pipeline/runner.py) ───────────────────────────────
+# A live 30-ASIN run showed Amazon soft-blocks an identity after a short
+# burst, and that a blocked identity NEVER recovers by waiting — only a fresh
+# identity (new cookie jar / fingerprint) does. So instead of a circuit
+# breaker that cools down and retries on the same session, the pipeline
+# paces requests with an AIMD rate limiter, rotates the identity once per
+# block event, and escalates unresolved rows to slower / heavier passes:
+#   pass 1 "fast"     — shared session, adaptive rate
+#   pass 2 "recovery" — fresh session after a short pause, slow fixed rate
+#   pass 3 "browser"  — real Chrome (undetected-chromedriver), sequential
+# Rows still unresolved after all passes end FAILED and are retryable.
+
+# Pass 1 — adaptive rate limiter (requests per second across all workers).
+FAST_INITIAL_RPS = 2.0
+FAST_MIN_RPS = 0.5
+FAST_MAX_RPS = 6.0
+RATE_INCREASE_STEP = 0.25          # additive increase ...
+RATE_INCREASE_EVERY = 10           # ... after this many consecutive successes
+RATE_JITTER_FRACTION = 0.25        # +/- spacing jitter so requests aren't metronomic
+BLOCK_PAUSE_BASE_SECONDS = 15.0    # global pause after a block event (doubles on repeats) ...
+BLOCK_PAUSE_MAX_SECONDS = 60.0     # ... capped here
+BLOCK_ESCALATION_WINDOW_SECONDS = 120.0  # blocks closer together than this escalate the pause
+BLOCK_DECAY_SUCCESSES = 25         # this many successes in a row step the escalation back down
+MAX_ATTEMPTS_FAST = 2              # per row, in pass 1, before deferring to pass 2
+FAST_ABORT_BLOCK_STREAK = 4        # consecutive block events with no success -> give up on pass 1
+FAST_ABORT_ERROR_STREAK = 30       # consecutive failed requests of any kind (e.g. network down) -> same
+RETRY_BACKOFF_SECONDS = 1.5        # pause before re-trying a non-block error (timeout, 5xx, odd page)
+
+# Pass 2 — recovery: fresh identity, slow and steady.
+RECOVERY_PAUSE_SECONDS = 20.0
+RECOVERY_RPS = 0.5
+RECOVERY_CONCURRENCY = 2
+MAX_ATTEMPTS_RECOVERY = 2
+RECOVERY_ABORT_BLOCK_STREAK = 3
+RECOVERY_ABORT_ERROR_STREAK = 10
+
+# Pass 3 — real Chrome fallback (fetcher/browser_fallback.py).
+BROWSER_FALLBACK_ENABLED = True
+BROWSER_HEADLESS = True
+BROWSER_PAGE_TIMEOUT_SECONDS = 30
+BROWSER_READY_TIMEOUT_SECONDS = 20.0   # wait for #productTitle / captcha / 404 markers
+BROWSER_SETTLE_TIMEOUT_SECONDS = 6.0   # then wait this long for price / availability to render
+BROWSER_GAP_MIN_SECONDS = 2.0
+BROWSER_GAP_MAX_SECONDS = 4.0
+BROWSER_BLOCK_PAUSE_SECONDS = 30.0     # pause before restarting Chrome after a captcha/block
+BROWSER_ABORT_BLOCK_STREAK = 3         # consecutive rows Chrome can't settle -> stop, leave rest FAILED
+# Optional explicit Chrome/Chromium binary (else auto-detected like scraper.py).
+CHROME_BINARY = os.environ.get("PV_CHROME_BINARY") or None
+UC_CACHE_DIR = BASE_DIR / "data" / "uc_cache"   # undetected-chromedriver's chromedriver download cache
 
 # ── Input validation ───────────────────────────────────────────────────────
-# "brand" is required (not just optional) because the whole point of the
-# report is one sheet per brand, issues only — see excel/report.py. pincode
-# is accepted if present (for the vendor's own record-keeping) but never
-# used, since price doesn't vary by pincode for this catalog.
-REQUIRED_COLUMNS = ("asin", "expected_price", "brand")
-OPTIONAL_COLUMNS = ("pincode",)
+# brand is optional: rows without one are grouped under the brand scraped
+# from the product page (see storage.checkpoint.effective_brand). pincode is
+# accepted if present (for the vendor's own record-keeping) but never used,
+# since price doesn't vary by pincode for this catalog.
+REQUIRED_COLUMNS = ("asin", "expected_price")
+OPTIONAL_COLUMNS = ("brand", "pincode")
 ASIN_LENGTH = 10
