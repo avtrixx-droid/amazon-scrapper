@@ -38,10 +38,13 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR = _get_base_dir()
-DB_PATH = BASE_DIR / "data" / "price_verifier.db"
-OUTPUT_DIR = BASE_DIR / "data" / "output"
-UPLOAD_DIR = BASE_DIR / "data" / "uploads"
-DEBUG_HTML_DIR = BASE_DIR / "data" / "debug_html"
+# PV_DATA_DIR relocates everything the app writes (tests / the simulator use
+# it so a throwaway run never touches the real run history).
+DATA_DIR = Path(os.environ["PV_DATA_DIR"]).resolve() if os.environ.get("PV_DATA_DIR") else BASE_DIR / "data"
+DB_PATH = DATA_DIR / "price_verifier.db"
+OUTPUT_DIR = DATA_DIR / "output"
+UPLOAD_DIR = DATA_DIR / "uploads"
+DEBUG_HTML_DIR = DATA_DIR / "debug_html"
 
 for d in (DB_PATH.parent, OUTPUT_DIR, UPLOAD_DIR, DEBUG_HTML_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -120,7 +123,7 @@ BROWSER_BLOCK_PAUSE_SECONDS = 30.0     # pause before restarting Chrome after a 
 BROWSER_ABORT_BLOCK_STREAK = 3         # consecutive rows Chrome can't settle -> stop, leave rest FAILED
 # Optional explicit Chrome/Chromium binary (else auto-detected like scraper.py).
 CHROME_BINARY = os.environ.get("PV_CHROME_BINARY") or None
-UC_CACHE_DIR = BASE_DIR / "data" / "uc_cache"   # undetected-chromedriver's chromedriver download cache
+UC_CACHE_DIR = DATA_DIR / "uc_cache"   # undetected-chromedriver's chromedriver download cache
 
 # ── Input validation ───────────────────────────────────────────────────────
 # brand is optional: rows without one are grouped under the brand scraped

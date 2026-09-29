@@ -137,9 +137,13 @@ class RealFetchSessionTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(503, text="<html>Service Unavailable</html>")
             if asin == "B0NOTFOUND1":
                 return httpx.Response(404, text="<html>Looking for something?</html>")
+            # MRP lives inside the core price container, as on real pages —
+            # the parser deliberately ignores strike-through prices elsewhere.
             html = product_html(asin, 1499.0).replace(
+                '</span></span></div>',
+                '</span></span><span class="a-price a-text-price basisPrice">'
+                '<span class="a-offscreen">₹1,999.00</span></span></div>', 1).replace(
                 '<input id="add-to-cart-button"',
-                '<span class="a-price a-text-price basisPrice"><span class="a-offscreen">₹1,999.00</span></span>'
                 '<div id="merchant-info">Sold by <a href="/x">Coco Blue Retail</a></div>'
                 '<input id="add-to-cart-button"')
             return httpx.Response(200, text=html)

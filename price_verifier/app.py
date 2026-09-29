@@ -61,6 +61,7 @@ _PHASE_LABELS = {
     "recovery": "Pass 2 of 3 — re-checking rows Amazon rate-limited, with a fresh session",
     "browser": "Pass 3 of 3 — double-checking remaining rows in Google Chrome",
     "done": "Finishing up — building your report",
+    "cancelled": "Pausing — saving progress",
 }
 
 _FIELD_UI = {
@@ -193,12 +194,19 @@ def _record_outcome(run_id: str, outcome) -> None:
 
 
 def _record_phase(run_id: str, phase: str, detail: dict) -> None:
+    detail = dict(detail or {})
     with _RUN_LOCK:
         st = _RUN_STATE.get(run_id)
-        if st is not None:
-            st["phase"] = phase
-            st["phase_detail"] = dict(detail or {})
-            st["phase_started"] = time.time()
+        if st is None:
+            return
+        if detail.get("event") == "block":
+            # Mid-pass pause: keep the pass's own label, add a countdown.
+            st["block_pause"] = (time.time(), float(detail.get("pause_seconds") or 0))
+            return
+        st["phase"] = phase
+        st["phase_detail"] = detail
+        st["phase_started"] = time.time()
+        st["block_pause"] = None
 
 
 def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_browser: bool) -> None:
@@ -226,14 +234,12 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
         )
 
     try:
+        # run_pipeline persists its own phase + stats_json to the DB.
         stats = asyncio.run(main())
-        with _RUN_LOCK:
-            cancelled = bool(_RUN_STATE[run_id]["cancel"] and _RUN_STATE[run_id]["cancel"].is_set())
-        if cancelled:
+        if stats.cancelled:
             checkpoint.mark_run_paused(run_id)
             final_status = "paused"
         else:
-            checkpoint.save_run_stats(run_id, stats)
             output_path = build_report(run_id)
             checkpoint.finish_run(run_id, str(output_path))
             final_status = "completed"
@@ -252,7 +258,7 @@ def _start_run(items: list[checkpoint.RunItemRow], run_cfg: checkpoint.RunConfig
     if run_id is None:
         run_id = checkpoint.create_run(run_cfg, items)
     else:
-        checkpoint.reopen_run(run_id)
+        checkpoint.reopen_run_for_retry(run_id)
     _init_run_state(run_id, total=len(items))
     thread = threading.Thread(target=_run_in_background, args=(run_id, items, run_cfg, use_browser), daemon=True)
     thread.start()
@@ -441,11 +447,16 @@ def _progress_payload(st: dict) -> dict:
     detail = st.get("phase_detail") or {}
     if detail.get("items"):
         label += f" ({detail['items']} rows)"
-    pause = detail.get("pause_s") or 0
-    if pause:
+    if detail.get("event") == "start":
+        pause = float(detail.get("pause_seconds") or 0)
         left = pause - (now - st.get("phase_started", now))
         if left > 0:
             label += f" — starting in {int(left) + 1}s"
+    block = st.get("block_pause")
+    if block:
+        left = block[1] - (now - block[0])
+        if left > 0:
+            label += f" — Amazon asked us to slow down, resuming in {int(left) + 1}s"
     return {
         "done": st["done"], "total": st["total"],
         "matched": st["matched"], "mismatched": st["mismatched"],

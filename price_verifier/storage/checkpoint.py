@@ -285,18 +285,29 @@ def finish_run(run_id: str, output_path: Optional[str], db_path: Path = config.D
 
 
 def mark_run_crashed(run_id: str, db_path: Path = config.DB_PATH) -> None:
+    """Also backs the "Discard" button, so it accepts a paused run too."""
     with get_conn(db_path) as conn:
-        conn.execute("UPDATE runs SET status='crashed' WHERE run_id=? AND status='running'", (run_id,))
+        conn.execute(
+            "UPDATE runs SET status='crashed' WHERE run_id=? AND status IN ('running', 'paused')", (run_id,)
+        )
+
+
+def mark_run_paused(run_id: str, db_path: Path = config.DB_PATH) -> None:
+    """The user pressed Pause: the run stops cleanly, every finished row is
+    already saved, and the home page offers to resume it."""
+    with get_conn(db_path) as conn:
+        conn.execute("UPDATE runs SET status='paused' WHERE run_id=? AND status='running'", (run_id,))
 
 
 def find_incomplete_run(db_path: Path = config.DB_PATH) -> Optional[dict]:
     """Called on app startup. A run left 'running' means the process died
     mid-run (crash, kill, power loss) without reaching finish_run — the
-    resume prompt the spec asks for."""
+    resume prompt the spec asks for. A run the user paused is offered the
+    same way."""
     init_db(db_path)
     with get_conn(db_path) as conn:
         row = conn.execute(
-            "SELECT * FROM runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            "SELECT * FROM runs WHERE status IN ('running', 'paused') ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
     return dict(row) if row else None
 
@@ -358,3 +369,17 @@ def get_brands_with_issues(run_id: str, db_path: Path = config.DB_PATH) -> list[
             (run_id, *ISSUE_STATUSES),
         ).fetchall()
     return [r["eb"] for r in rows]
+
+
+def get_brand_issue_counts(run_id: str, db_path: Path = config.DB_PATH) -> list[dict]:
+    """[{"brand": ..., "issues": n}] per effective brand with at least one
+    issue row, alphabetical — the results page's per-brand download list."""
+    placeholders = ",".join("?" * len(ISSUE_STATUSES))
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            f"""SELECT {_EFFECTIVE_BRAND_SQL} AS eb, COUNT(*) AS n FROM run_items
+                WHERE run_id = ? AND status IN ({placeholders})
+                GROUP BY eb ORDER BY eb COLLATE NOCASE""",
+            (run_id, *ISSUE_STATUSES),
+        ).fetchall()
+    return [{"brand": r["eb"], "issues": r["n"]} for r in rows]
