@@ -71,6 +71,67 @@ def build_client(cookies: dict[str, str], user_agent: str) -> httpx.AsyncClient:
     )
 
 
+class FetchSession:
+    """One logical browser identity: a persistent cookie jar and a fixed
+    user agent / fingerprint, reused for every request until rotate().
+
+    CONTRACT (pipeline/ codes against exactly this surface):
+      - FetchSession(*, base_url=None, httpx_transport=None)
+          base_url defaults to config.MARKETPLACE_BASE_URL.
+          httpx_transport: test hook — forces the httpx backend with that
+          transport (e.g. httpx.MockTransport). Production code never passes it.
+      - .backend -> str: "curl_cffi" or "httpx"
+      - await .start(warm_up=True): open the session; warm_up GETs the
+          homepage first so product requests carry real session cookies.
+          Warm-up failure is swallowed (never raises).
+      - await .fetch(asin) -> FetchResult: GET /dp/{asin}. Never raises.
+      - await .rotate(): close and replace with a fresh identity (new
+          cookie jar, new UA), then warm up again. Never raises.
+      - await .close(): idempotent.
+    """
+
+    def __init__(self, *, base_url: str | None = None, httpx_transport=None):
+        self._base_url = (base_url or config.MARKETPLACE_BASE_URL).rstrip("/")
+        self._transport = httpx_transport
+        self._client: httpx.AsyncClient | None = None
+        self.backend = "httpx"
+
+    async def start(self, warm_up: bool = True) -> None:
+        kwargs = dict(
+            base_url=self._base_url,
+            headers={**_DEFAULT_HEADERS, "User-Agent": _DEFAULT_USER_AGENT},
+            timeout=config.REQUEST_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        )
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        else:
+            kwargs["http2"] = True
+        self._client = httpx.AsyncClient(**kwargs)
+        if warm_up:
+            try:
+                await self._client.get("/")
+            except Exception:
+                pass
+
+    async def fetch(self, asin: str) -> FetchResult:
+        if self._client is None:
+            await self.start()
+        return await fetch_product_page(self._client, asin)
+
+    async def rotate(self) -> None:
+        await self.close()
+        await self.start()
+
+    async def close(self) -> None:
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+            self._client = None
+
+
 async def fetch_product_page(client: httpx.AsyncClient, asin: str) -> FetchResult:
     """Single fetch attempt, no retry. Errors are captured, never raised —
     the pipeline decides what a given error means for the row's status."""

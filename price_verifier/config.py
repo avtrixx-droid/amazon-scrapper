@@ -13,6 +13,7 @@ confirms the real answer.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -57,7 +58,9 @@ DEFAULT_PRICE_SOURCE = "buybox"   # "buybox" | "lowest" — PENDING CONFIRMATION
 DEFAULT_TOLERANCE_ABS = 1.0
 DEFAULT_TOLERANCE_PCT = 0.0       # percent, applied in addition to abs if set
 
-MARKETPLACE_BASE_URL = "https://www.amazon.in"  # PENDING CONFIRMATION (spec Q5, .in assumed)
+# Env override exists only so the test suite / local simulator
+# (price_verifier/tests/sim_amazon.py) can point a real run at a fake Amazon.
+MARKETPLACE_BASE_URL = os.environ.get("PV_MARKETPLACE_BASE_URL", "https://www.amazon.in").rstrip("/")
 
 # Confirmed by the vendor: the same price applies at every pincode, so no
 # delivery-location session bootstrap is needed for a normal run. This also
