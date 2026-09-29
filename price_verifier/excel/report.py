@@ -1,31 +1,28 @@
 """
 report.py — builds the output workbook.
 
-Rewritten per the vendor's actual workflow (not the original spec's generic
-Matched/Mismatched/OOS/Failed sheets): they tally price against what a
-specific seller (e.g. "Coco Blue") is showing on Amazon, and when it's
-wrong, they email that seller the discrepancy. So the report is now:
+Shaped around the vendor's workflow: tally live Amazon price against what
+was agreed with a seller, and email that seller when it's wrong. So:
 
-- One sheet PER BRAND, since each brand's issues get emailed to a
-  different seller relationship.
-- Each brand sheet lists ONLY rows with an issue (mismatch beyond
-  tolerance, out of stock, unavailable, or not found) — a correct price
-  is not something anyone needs to see or forward.
-- Columns center on what an email needs: ASIN, title, seller (who to
-  email), expected vs. actual vs. MRP, and the ₹ difference.
-- Rows that failed to scrape (couldn't be checked at all) are NOT a
-  pricing issue to send anyone — they go in one "Could Not Verify" sheet
-  instead, plus an "Overview" sheet up front for a quick per-brand count
-  before drilling into any one brand's tab.
+- One sheet PER BRAND (each brand's issues go to a different seller).
+- Each brand sheet lists ONLY rows with an issue — price mismatch beyond
+  tolerance, out of stock, unavailable, no buy box, ASIN not found.
+- Columns follow the vendor's own description: ASIN, then expected price,
+  then the price Amazon shows, the difference, MRP, seller — then context.
+- Rows that couldn't be checked at all are not a pricing issue to send
+  anyone; they go on one "Could Not Verify" sheet (and the app offers a
+  Retry button for them). An "Overview" sheet summarises per brand and a
+  "Run Info" sheet records how the run went.
 
-Reads directly from SQLite (storage/checkpoint.py) rather than taking an
-in-memory result list, so "re-download" from History, and the per-brand
-single-sheet export, are both just re-running this against a past run_id.
+Reads straight from SQLite, so History re-downloads and the per-brand
+single-sheet export are just this module re-run against a past run_id.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -40,31 +37,39 @@ HEADER_FILL = PatternFill("solid", fgColor="003366")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ALT_FILL = PatternFill("solid", fgColor="F7F7F7")
 MISMATCH_FILL = PatternFill("solid", fgColor="FFE0E0")
+LISTING_FILL = PatternFill("solid", fgColor="FFF4D6")
+LINK_FONT = Font(color="0563C1", underline="single")
+MONEY_FORMAT = "#,##0.00"
+
+_STATUS_NO_OFFER = getattr(checkpoint, "STATUS_NO_FEATURED_OFFER", "no_featured_offer")
 
 _STATUS_DISPLAY = {
     checkpoint.STATUS_MISMATCHED: "PRICE MISMATCH",
-    checkpoint.STATUS_OUT_OF_STOCK: "OUT_OF_STOCK",
+    checkpoint.STATUS_OUT_OF_STOCK: "OUT OF STOCK",
     checkpoint.STATUS_UNAVAILABLE: "UNAVAILABLE",
-    checkpoint.STATUS_NOT_FOUND: "NOT_FOUND",
+    checkpoint.STATUS_NOT_FOUND: "ASIN NOT FOUND",
+    _STATUS_NO_OFFER: "NO BUY BOX",
 }
 
-_ISSUE_SHEET_HEADERS = [
-    "asin", "product_title", "seller", "expected_price", "amazon_price",
-    "mrp", "difference", "status", "url", "checked_at",
-]
+# Internal failure codes -> something a vendor can act on.
+_FRIENDLY_REASONS = (
+    ("soft_block", "Amazon temporarily limited requests — use Retry"),
+    ("throttled", "Amazon temporarily limited requests — use Retry"),
+    ("captcha", "Amazon asked for a CAPTCHA — use Retry"),
+    ("timeout", "Amazon took too long to respond — use Retry"),
+    ("connection", "Network problem reaching Amazon — check internet, then Retry"),
+    ("chrome", "Final check in Google Chrome wasn't possible — install/update Chrome, then Retry"),
+    ("browser", "Final check in Google Chrome failed — use Retry"),
+    ("selector", "Page layout not recognised — saved for diagnosis; use Retry"),
+    ("price could not be parsed", "Price not shown on the page — saved for diagnosis; use Retry"),
+)
 
 _INVALID_SHEET_CHARS = re.compile(r"[\\/?*\[\]:]")
 
-# Excel/CSV formula-injection hardening: product_title and seller come from
-# scraped Amazon HTML — external, seller-controlled text — and this
-# workbook's whole purpose is to be forwarded to that seller (and possibly
-# re-exported to CSV downstream) by email. A cell value openpyxl writes as a
-# plain string is not itself a live formula in .xlsx, but a leading
-# =/+/-/@ is what spreadsheet apps' CSV importers (and some older Excel
-# "smart" behavior) key off to reinterpret text as a formula on open/paste.
-# Prefixing a leading apostrophe is the standard, invisible-in-Excel
-# mitigation (OWASP's CSV-injection guidance) and costs nothing for the
-# overwhelming majority of values that don't start with one of these.
+# Excel/CSV formula-injection hardening: title/seller/brand come from scraped
+# Amazon HTML (seller-controlled) or the vendor's upload, and this workbook
+# gets forwarded by email. A leading =/+/-/@ is what spreadsheet apps key off
+# to reinterpret text as a formula; an apostrophe prefix neutralises it.
 _FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
 
 
@@ -75,8 +80,8 @@ def _sanitize_cell_text(value):
 
 
 def _sanitize_sheet_name(name: str, used: set[str]) -> str:
-    """Excel sheet names: <=31 chars, no \\ / ? * [ ] : , must be unique
-    within the workbook. Truncates and de-dupes with a numeric suffix."""
+    """Excel sheet names: <=31 chars, none of \\ / ? * [ ] :, unique
+    (case-insensitively) within the workbook."""
     cleaned = _INVALID_SHEET_CHARS.sub(" ", (name or "Unknown Brand").strip()) or "Unknown Brand"
     cleaned = cleaned[:31]
     candidate = cleaned
@@ -89,31 +94,75 @@ def _sanitize_sheet_name(name: str, used: set[str]) -> str:
     return candidate
 
 
-def _write_table(ws: Worksheet, headers: list[str], display_headers: list[str], rows: list[tuple]) -> None:
-    ws.append(display_headers)
-    for col in range(1, len(display_headers) + 1):
+def _local_time(iso: str | None) -> str | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%d %b %Y, %I:%M %p")
+    except ValueError:
+        return iso
+
+
+def _friendly_reason(reason: str | None) -> str | None:
+    if not reason:
+        return None
+    low = reason.lower()
+    for needle, text in _FRIENDLY_REASONS:
+        if needle in low:
+            return text
+    return reason
+
+
+def _brand(r: dict) -> str:
+    return checkpoint.effective_brand(r)
+
+
+def _write_table(ws: Worksheet, headers: list[str], rows: list[tuple], widths: dict[int, int] | None = None) -> None:
+    ws.append(headers)
+    for col in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col)
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
-        cell.alignment = Alignment(vertical="center")
-    ws.row_dimensions[1].height = 25
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 30
 
     for i, row in enumerate(rows, start=2):
         ws.append(row)
         if i % 2 == 0:
-            for col in range(1, len(display_headers) + 1):
+            for col in range(1, len(headers) + 1):
                 ws.cell(row=i, column=col).fill = ALT_FILL
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(display_headers))}{max(len(rows) + 1, 1)}"
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(len(rows) + 1, 1)}"
 
-    for col in range(1, len(display_headers) + 1):
+    for col in range(1, len(headers) + 1):
         letter = get_column_letter(col)
-        max_len = len(str(display_headers[col - 1]))
-        for row in rows:
+        if widths and col in widths:
+            ws.column_dimensions[letter].width = widths[col]
+            continue
+        max_len = len(str(headers[col - 1]))
+        for row in rows[:500]:
             val = row[col - 1] if col - 1 < len(row) else ""
             max_len = max(max_len, len(str(val)) if val is not None else 0)
         ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 60)
+
+
+_ISSUE_HEADERS = [
+    "ASIN", "Expected Price (₹)", "Price on Amazon (₹)", "Difference (₹)", "MRP (₹)",
+    "Seller", "Product Title", "Status", "Note", "Amazon Link", "Checked At",
+]
+_ISSUE_MONEY_COLS = (2, 3, 4, 5)
+_ISSUE_LINK_COL = 10
+
+
+def _issue_note(r: dict) -> str | None:
+    if r["status"] == checkpoint.STATUS_MISMATCHED and r["actual_price"] is not None:
+        diff = r["actual_price"] - r["expected_price"]
+        direction = "higher" if diff > 0 else "lower"
+        return f"Amazon shows ₹{abs(diff):,.2f} {direction} than expected"
+    if r["status"] == _STATUS_NO_OFFER:
+        return "No seller holds the buy box (Amazon shows 'See All Buying Options')"
+    return _friendly_reason(r.get("error_reason"))
 
 
 def _issue_row(r: dict) -> tuple:
@@ -122,39 +171,73 @@ def _issue_row(r: dict) -> tuple:
     diff = round(actual - expected, 2) if actual is not None else None
     return (
         r["asin"],
-        _sanitize_cell_text(r["product_title"]),
-        _sanitize_cell_text(r["seller"]),
         expected,
         actual,
-        r["mrp"],
         diff,
+        r.get("mrp"),
+        _sanitize_cell_text(r.get("seller")) or ("—" if r["status"] != checkpoint.STATUS_MISMATCHED else None),
+        _sanitize_cell_text(r.get("product_title")),
         _STATUS_DISPLAY.get(r["status"], r["status"].upper()),
-        r["url"],
-        r["checked_at"],
+        _sanitize_cell_text(_issue_note(r)),
+        "View on Amazon" if r.get("url") else None,
+        _local_time(r.get("checked_at")),
     )
 
 
 def _write_issue_sheet(ws: Worksheet, items: list[dict]) -> None:
-    display_headers = [
-        "ASIN", "Product Title", "Seller", "Expected Price (₹)", "Amazon Price (₹)",
-        "MRP (₹)", "Difference (₹)", "Status", "URL", "Checked At",
-    ]
-    rows = [_issue_row(r) for r in items]
-    _write_table(ws, _ISSUE_SHEET_HEADERS, display_headers, rows)
-    # Highlight price-mismatch rows so the biggest problem type is visible
-    # at a glance without reading the Status column.
+    items = sorted(items, key=lambda r: (r["status"] != checkpoint.STATUS_MISMATCHED, r["asin"]))
+    _write_table(
+        ws, _ISSUE_HEADERS, [_issue_row(r) for r in items],
+        widths={1: 14, 2: 12, 3: 12, 4: 12, 5: 11, 6: 26, 7: 50, 8: 16, 9: 46, 10: 15, 11: 21},
+    )
     for i, r in enumerate(items, start=2):
-        if r["status"] == checkpoint.STATUS_MISMATCHED:
-            for col in range(1, len(display_headers) + 1):
-                ws.cell(row=i, column=col).fill = MISMATCH_FILL
+        fill = MISMATCH_FILL if r["status"] == checkpoint.STATUS_MISMATCHED else LISTING_FILL
+        for col in range(1, len(_ISSUE_HEADERS) + 1):
+            ws.cell(row=i, column=col).fill = fill
+        for col in _ISSUE_MONEY_COLS:
+            ws.cell(row=i, column=col).number_format = MONEY_FORMAT
+        if r.get("url"):
+            link = ws.cell(row=i, column=_ISSUE_LINK_COL)
+            link.hyperlink = r["url"]
+            link.font = LINK_FONT
 
 
-def _brand_issue_items(run_id: str, brand: str, db_path: Path) -> list[dict]:
-    all_items = checkpoint.get_run_items(run_id, db_path=db_path)
-    return [
-        r for r in all_items
-        if r["brand"] == brand and r["status"] in checkpoint.ISSUE_STATUSES
+def _issue_items_for(items: list[dict], brand: str) -> list[dict]:
+    return [r for r in items if _brand(r) == brand and r["status"] in checkpoint.ISSUE_STATUSES]
+
+
+def _write_run_info(ws: Worksheet, run: dict, items: list[dict]) -> None:
+    stats = {}
+    if run.get("stats_json"):
+        try:
+            stats = json.loads(run["stats_json"])
+        except (TypeError, ValueError):
+            stats = {}
+    by_resolver: dict[str, int] = {}
+    for r in items:
+        if r["status"] != checkpoint.STATUS_FAILED and r.get("resolved_by"):
+            by_resolver[r["resolved_by"]] = by_resolver.get(r["resolved_by"], 0) + 1
+
+    rows: list[tuple] = [
+        ("Input file", run["input_filename"]),
+        ("Started", _local_time(run["started_at"])),
+        ("Finished", _local_time(run.get("finished_at"))),
+        ("ASINs checked", len(items)),
+        ("Price OK", run["matched"]),
+        ("Price mismatch", run["mismatched"]),
+        ("Listing issues (OOS / unavailable / no buy box / not found)", run["out_of_stock"]),
+        ("Could not verify", run["failed"]),
+        ("Tolerance", f"± ₹{run['tolerance_abs']:g}" + (f" or ± {run['tolerance_pct']:g}%" if run["tolerance_pct"] else "")),
     ]
+    labels = {"http": "Resolved on first pass", "recovery": "Resolved on recovery pass", "browser": "Resolved via Google Chrome check"}
+    for key in ("http", "recovery", "browser"):
+        if by_resolver.get(key):
+            rows.append((labels[key], by_resolver[key]))
+    for key, value in stats.items():
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+            rows.append((key.replace("_", " ").capitalize(), value))
+    _write_table(ws, ["Item", "Value"], [(_sanitize_cell_text(k), _sanitize_cell_text(v)) for k, v in rows],
+                 widths={1: 52, 2: 40})
 
 
 def build_report(run_id: str, output_path: Path | None = None, db_path: Path = config.DB_PATH) -> Path:
@@ -163,53 +246,59 @@ def build_report(run_id: str, output_path: Path | None = None, db_path: Path = c
         raise ValueError(f"Unknown run_id: {run_id}")
 
     items = checkpoint.get_run_items(run_id, db_path=db_path)
-    brands = sorted({r["brand"] for r in items}, key=str.lower)
-    failed = [r for r in items if r["status"] == checkpoint.STATUS_FAILED]
+    brands = sorted({_brand(r) for r in items}, key=str.lower)
+    failed = sorted((r for r in items if r["status"] == checkpoint.STATUS_FAILED), key=lambda r: r["asin"])
 
     wb = Workbook()
 
-    # ── Overview: one row per brand, quick triage before opening any tab ──
     ws_overview = wb.active
     ws_overview.title = "Overview"
     overview_rows = []
     for brand in brands:
-        brand_items = [r for r in items if r["brand"] == brand]
-        matched = sum(1 for r in brand_items if r["status"] == checkpoint.STATUS_MATCHED)
-        mismatched = sum(1 for r in brand_items if r["status"] == checkpoint.STATUS_MISMATCHED)
-        oos = sum(1 for r in brand_items if r["status"] in (
-            checkpoint.STATUS_OUT_OF_STOCK, checkpoint.STATUS_UNAVAILABLE, checkpoint.STATUS_NOT_FOUND
-        ))
-        brand_failed = sum(1 for r in brand_items if r["status"] == checkpoint.STATUS_FAILED)
-        overview_rows.append((
-            _sanitize_cell_text(brand), len(brand_items), matched, mismatched, oos, brand_failed, mismatched + oos,
-        ))
+        b_items = [r for r in items if _brand(r) == brand]
+        matched = sum(1 for r in b_items if r["status"] == checkpoint.STATUS_MATCHED)
+        mismatched = sum(1 for r in b_items if r["status"] == checkpoint.STATUS_MISMATCHED)
+        listing = sum(1 for r in b_items if r["status"] in checkpoint.ISSUE_STATUSES
+                      and r["status"] != checkpoint.STATUS_MISMATCHED)
+        b_failed = sum(1 for r in b_items if r["status"] == checkpoint.STATUS_FAILED)
+        overview_rows.append((_sanitize_cell_text(brand), len(b_items), matched, mismatched, listing, b_failed,
+                              mismatched + listing))
     _write_table(
         ws_overview,
-        ["brand", "total", "matched", "mismatched", "oos", "failed", "issues"],
-        ["Brand", "Total ASINs", "Matched", "Mismatched", "Out of Stock / Unavailable / Not Found", "Could Not Verify", "Issues (needs action)"],
+        ["Brand", "ASINs", "Price OK", "Price Mismatch", "Listing Issue (OOS / no buy box / not found)",
+         "Could Not Verify", "Needs Action"],
         overview_rows,
+        widths={1: 24, 2: 9, 3: 10, 4: 15, 5: 26, 6: 17, 7: 14},
     )
 
-    # ── One sheet per brand, issues only ───────────────────────────────────
-    used_sheet_names: set[str] = {"overview"}
+    used_sheet_names: set[str] = {"overview", "could not verify", "run info"}
     for brand in brands:
-        issue_items = _brand_issue_items(run_id, brand, db_path)
         ws = wb.create_sheet(_sanitize_sheet_name(brand, used_sheet_names))
-        _write_issue_sheet(ws, issue_items)
+        _write_issue_sheet(ws, _issue_items_for(items, brand))
 
-    # ── Could Not Verify: scrape failures, not a pricing issue per se ──────
-    ws_failed = wb.create_sheet(_sanitize_sheet_name("Could Not Verify", used_sheet_names))
+    ws_failed = wb.create_sheet("Could Not Verify")
     _write_table(
         ws_failed,
-        ["asin", "brand", "error_reason", "attempts", "last_attempt_at"],
-        ["ASIN", "Brand", "Error Reason", "Attempts", "Last Attempt At"],
-        [(r["asin"], _sanitize_cell_text(r["brand"]), r["error_reason"], r["attempts"], r["checked_at"]) for r in failed],
+        ["ASIN", "Brand", "Expected Price (₹)", "Reason", "Attempts", "Last Tried", "Amazon Link"],
+        [(r["asin"], _sanitize_cell_text(_brand(r)), r["expected_price"],
+          _sanitize_cell_text(_friendly_reason(r.get("error_reason")) or "Unknown"),
+          r["attempts"], _local_time(r.get("checked_at")), "View on Amazon" if r.get("url") else None)
+         for r in failed],
+        widths={1: 14, 2: 20, 3: 12, 4: 60, 5: 10, 6: 21, 7: 15},
     )
-    if failed or items:
-        summary_row = ws_failed.max_row + 2
-        ws_failed.cell(row=summary_row, column=1, value=(
-            f"{len(items) - len(failed)} of {len(items)} processed successfully; {len(failed)} could not be verified."
-        )).font = Font(italic=True)
+    for i, r in enumerate(failed, start=2):
+        ws_failed.cell(row=i, column=3).number_format = MONEY_FORMAT
+        if r.get("url"):
+            link = ws_failed.cell(row=i, column=7)
+            link.hyperlink = r["url"]
+            link.font = LINK_FONT
+    summary_row = ws_failed.max_row + 2
+    ws_failed.cell(row=summary_row, column=1, value=(
+        f"{len(items) - len(failed)} of {len(items)} ASINs verified; {len(failed)} could not be verified."
+        + (" Use Retry in the app to re-check them." if failed else "")
+    )).font = Font(italic=True)
+
+    _write_run_info(wb.create_sheet("Run Info"), run, items)
 
     if output_path is None:
         output_path = config.OUTPUT_DIR / f"PriceVerification_{run_id}.xlsx"
@@ -219,24 +308,21 @@ def build_report(run_id: str, output_path: Path | None = None, db_path: Path = c
 
 
 def build_brand_report(run_id: str, brand: str, output_path: Path | None = None, db_path: Path = config.DB_PATH) -> Path:
-    """A single brand's issue list as its own small workbook — meant to be
-    attached to the email that goes to that brand's seller directly,
-    without the vendor needing to extract a sheet from the full report."""
+    """One brand's issue list as its own small workbook — attach it directly
+    to the email that goes to that brand's seller."""
     run = checkpoint.get_run(run_id, db_path=db_path)
     if run is None:
         raise ValueError(f"Unknown run_id: {run_id}")
 
-    issue_items = _brand_issue_items(run_id, brand, db_path)
-
+    items = checkpoint.get_run_items(run_id, db_path=db_path)
     wb = Workbook()
     ws = wb.active
-    used_sheet_names: set[str] = set()
-    ws.title = _sanitize_sheet_name(brand, used_sheet_names)
-    _write_issue_sheet(ws, issue_items)
+    ws.title = _sanitize_sheet_name(brand, set())
+    _write_issue_sheet(ws, _issue_items_for(items, brand))
 
     if output_path is None:
-        safe_brand = _INVALID_SHEET_CHARS.sub("_", brand).strip().replace(" ", "_") or "brand"
-        output_path = config.OUTPUT_DIR / f"PriceVerification_{run_id}_{safe_brand}.xlsx"
+        safe_brand = re.sub(r"[^A-Za-z0-9._-]+", "_", brand).strip("_") or "brand"
+        output_path = config.OUTPUT_DIR / f"PriceIssues_{safe_brand}_{run_id}.xlsx"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(output_path))
     return output_path

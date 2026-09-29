@@ -80,7 +80,8 @@ class BuildReportTests(unittest.TestCase):
         checkpoint.mark_item_result(run_id, "B0000000A1", checkpoint.STATUS_MATCHED, actual_price=1499.0, db_path=self.db_path)
         checkpoint.mark_item_result(
             run_id, "B0000000A2", checkpoint.STATUS_MISMATCHED, actual_price=1050.0, mrp=1200.0,
-            seller="Coco Blue Retail", product_title="Lapcare USB Hub", db_path=self.db_path,
+            seller="Coco Blue Retail", product_title="Lapcare USB Hub",
+            url="https://www.amazon.in/dp/B0000000A2", db_path=self.db_path,
         )
         checkpoint.mark_item_result(run_id, "B0000000B1", checkpoint.STATUS_MATCHED, actual_price=2999.0, db_path=self.db_path)
         checkpoint.mark_item_result(run_id, "B0000000B2", checkpoint.STATUS_FAILED, error_reason="captcha_challenge", db_path=self.db_path)
@@ -91,7 +92,7 @@ class BuildReportTests(unittest.TestCase):
         run_id = self._seed_run()
         path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
         wb = load_workbook(path)
-        self.assertEqual(wb.sheetnames, ["Overview", "Lapcare", "Portronics", "Could Not Verify"])
+        self.assertEqual(wb.sheetnames, ["Overview", "Lapcare", "Portronics", "Could Not Verify", "Run Info"])
 
     def test_brand_sheet_contains_only_issue_rows(self):
         run_id = self._seed_run()
@@ -122,16 +123,16 @@ class BuildReportTests(unittest.TestCase):
         path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
         wb = load_workbook(path)
         rows = list(wb["Lapcare"].iter_rows(values_only=True))
-        # 1050 actual - 999 expected = 51
-        self.assertEqual(rows[1][6], 51)
+        # ASIN, Expected, Amazon, Difference — 1050 actual - 999 expected = 51
+        self.assertEqual(rows[1][1:4], (999, 1050, 51))
 
     def test_seller_and_mrp_present_in_issue_row(self):
         run_id = self._seed_run()
         path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
         wb = load_workbook(path)
         rows = list(wb["Lapcare"].iter_rows(values_only=True))
-        self.assertEqual(rows[1][2], "Coco Blue Retail")  # Seller column
-        self.assertEqual(rows[1][5], 1200.0)  # MRP column
+        self.assertEqual(rows[1][5], "Coco Blue Retail")  # Seller column
+        self.assertEqual(rows[1][4], 1200.0)  # MRP column
 
     def test_malicious_seller_name_neutralized_in_real_workbook(self):
         run_cfg = checkpoint.RunConfig(input_filename="t.csv")
@@ -145,7 +146,7 @@ class BuildReportTests(unittest.TestCase):
         path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
         wb = load_workbook(path)
         rows = list(wb["Lapcare"].iter_rows(values_only=True))
-        seller_cell, title_cell = rows[1][2], rows[1][1]
+        seller_cell, title_cell = rows[1][5], rows[1][6]
         # openpyxl round-trips a leading apostrophe as a literal quote
         # character on read-back (it's a formatting hint, not stored data),
         # so what matters is that the value no longer starts with a
@@ -169,6 +170,33 @@ class BuildReportTests(unittest.TestCase):
         self.assertEqual(wb.sheetnames, ["Lapcare"])
         rows = list(wb["Lapcare"].iter_rows(values_only=True))
         self.assertEqual(len(rows), 2)  # header + 1 issue row
+
+    def test_prices_left_of_context_columns_and_link_clickable(self):
+        run_id = self._seed_run()
+        path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
+        ws = load_workbook(path)["Lapcare"]
+        headers = [c.value for c in ws[1]]
+        self.assertEqual(headers[:4], ["ASIN", "Expected Price (₹)", "Price on Amazon (₹)", "Difference (₹)"])
+        link = ws.cell(row=2, column=headers.index("Amazon Link") + 1)
+        self.assertEqual(link.hyperlink.target, "https://www.amazon.in/dp/B0000000A2")
+        note = ws.cell(row=2, column=headers.index("Note") + 1).value
+        self.assertIn("higher than expected", note)
+
+    def test_failed_reason_is_vendor_friendly(self):
+        run_id = self._seed_run()
+        path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
+        rows = list(load_workbook(path)["Could Not Verify"].iter_rows(values_only=True))
+        self.assertIn("Retry", rows[1][3])
+        self.assertNotIn("captcha_challenge", rows[1][3])
+
+    def test_blank_upload_brand_falls_back_to_scraped_brand(self):
+        run_cfg = checkpoint.RunConfig(input_filename="t.csv")
+        items = [checkpoint.RunItemRow(asin="B0000000C1", expected_price=100.0, brand="")]
+        run_id = checkpoint.create_run(run_cfg, items, db_path=self.db_path)
+        checkpoint.mark_item_result(run_id, "B0000000C1", checkpoint.STATUS_MISMATCHED, actual_price=150.0,
+                                    scraped_brand="GLOTY", db_path=self.db_path)
+        path = build_report(run_id, output_path=self.out_dir / "r.xlsx", db_path=self.db_path)
+        self.assertIn("GLOTY", load_workbook(path).sheetnames)
 
     def test_build_brand_report_for_clean_brand_is_empty(self):
         run_id = self._seed_run()
