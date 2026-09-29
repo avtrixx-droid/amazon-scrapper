@@ -13,7 +13,11 @@ from __future__ import annotations
 
 
 def prices_match(expected: float, actual: float, tolerance_abs: float, tolerance_pct: float) -> bool:
-    diff = abs(expected - actual)
+    """True if the prices are within EITHER tolerance, i.e. the % setting can
+    only ignore more differences, never flag more (the UI labels it that way).
+    The difference is rounded to paise first: 128.02 - 127.02 is
+    1.0000000000000002 in floating point, and must count as exactly ₹1."""
+    diff = round(abs(expected - actual), 2)
     if tolerance_abs and diff <= tolerance_abs:
         return True
     if tolerance_pct and expected > 0 and (diff / expected) * 100 <= tolerance_pct:

@@ -230,7 +230,9 @@ def _asin_error_reason(value) -> str:
 
 # ── Price parsing ───────────────────────────────────────────────────────────
 
-_PRICE_PREFIX_RE = re.compile(r"^(?:₹|rs\.?|inr|\$)\s*", re.I)
+# "?" / "\ufffd" / "â‚¹": what "₹" turns into when Excel saves a CSV in the
+# Windows ANSI code page, or a UTF-8 file is read as cp1252.
+_PRICE_PREFIX_RE = re.compile(r"^(?:₹|rs\.?|inr|\$|\?+|\ufffd+|â‚¹)\s*", re.I)
 _PRICE_SUFFIX_RE = re.compile(r"\s*(?:/-|/=|₹|rs\.?|inr|only|\.)$", re.I)
 _PLAIN_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
 # Western (1,499 / 1,234,567) and Indian lakh (1,49,999) grouping; the last
@@ -365,26 +367,55 @@ def _asin_header_score(norm: str) -> float:
     return 0.0
 
 
+# In a heading that already names a price ("Price after Discount", "SP incl
+# GST", "Price (after 10% off)") these words describe WHICH price it is —
+# they don't make it a non-price column, the way a bare "Discount" or "GST %"
+# heading does.
+_PRICE_NAMING = ("price", "sp", "rate")
+_PRICE_EXCL_TAX = ("excl", "exclusive", "excluding", "ex gst", "without gst", "without tax", "w o gst",
+                   "wo gst", "before gst", "pre gst", "before tax", "basic", "base price", "taxable")
+_PRICE_INCL_TAX = ("incl", "inclusive", "including", "inc gst", "with gst", "with tax", "after gst",
+                   "gst inclusive")
+_PRICE_OLD = ("old", "previous", "prev", "earlier", "existing", "last")
+_PRICE_NEW = ("new", "revised", "updated", "latest", "final")
+
+
 def _price_header_score(norm: str, raw: str) -> float:
     """1.0 exact strong / 0.9 contains strong / 0.5 weak / 0.4 contains weak /
-    0 unknown / -0.5 price-like negative (MRP, cost) / -1 non-price numeric."""
+    0 unknown / -0.5 price-like negative (MRP, cost) / -1 non-price numeric.
+
+    Headings that name a price get small nudges so the one Amazon should
+    actually show wins a tie: GST-inclusive over GST-exclusive, new/revised
+    over old/previous."""
     if not norm:
         return 0.0
     neg_other = _contains_phrase(norm, _PRICE_NEG_OTHER) or ("%" in raw)
     neg_price = _contains_phrase(norm, _PRICE_NEG_PRICELIKE)
+    names_price = bool(_contains_phrase(norm, _PRICE_NAMING))
     if norm in _PRICE_STRONG:
         return 1.0
-    if _contains_phrase(norm, _PRICE_STRONG):
-        return 0.3 if (neg_other or neg_price) else 0.9
-    if neg_other:
-        return -1.0
     if neg_price:
+        # "MRP", "MRP Price", "Cost Price", "Dealer Price": a price, but not the selling price.
         return -0.5
-    if norm in _PRICE_WEAK:
-        return 0.5
-    if _contains_phrase(norm, _PRICE_WEAK):
-        return 0.4
-    return 0.0
+    if neg_other and not names_price:
+        return -1.0
+    if _contains_phrase(norm, _PRICE_STRONG):
+        base = 0.9
+    elif norm in _PRICE_WEAK:
+        base = 0.5
+    elif _contains_phrase(norm, _PRICE_WEAK):
+        base = 0.4
+    else:
+        return 0.0
+    if _contains_phrase(norm, _PRICE_EXCL_TAX) or "+" in raw:
+        base -= 0.15   # Amazon always shows the GST-inclusive price
+    elif _contains_phrase(norm, _PRICE_INCL_TAX):
+        base += 0.05
+    if _contains_phrase(norm, _PRICE_OLD):
+        base -= 0.2
+    elif _contains_phrase(norm, _PRICE_NEW):
+        base += 0.05
+    return round(base, 3)
 
 
 def _brand_header_score(norm: str) -> float:
@@ -413,7 +444,7 @@ def _is_texty(v) -> bool:
 # ── Loading ─────────────────────────────────────────────────────────────────
 
 def load_table(filename: str, data: bytes, sheet_name: Optional[str] = None) -> RawTable:
-    """Read a .csv/.tsv/.xlsx/.xlsm upload into a RawTable (header row found,
+    """Read a .csv/.tsv/.txt/.xlsx/.xlsm upload into a RawTable (header row found,
     blank rows dropped). Raises InputValidationError with a vendor-friendly
     message for unsupported, unreadable or empty files."""
     suffix = Path(filename or "").suffix.lower()
@@ -422,7 +453,7 @@ def load_table(filename: str, data: bytes, sheet_name: Optional[str] = None) -> 
             "This is an old-style Excel file (.xls), which can't be read. Open it in Excel, "
             "choose File → Save As, pick 'Excel Workbook (.xlsx)' or 'CSV', and upload that file."
         )
-    if suffix not in (".csv", ".tsv", ".xlsx", ".xlsm"):
+    if suffix not in (".csv", ".tsv", ".txt", ".xlsx", ".xlsm"):
         shown = suffix or "(no extension)"
         raise InputValidationError(
             f"Unsupported file type '{shown}'. Please upload an Excel file (.xlsx) or a .csv file."
@@ -430,7 +461,7 @@ def load_table(filename: str, data: bytes, sheet_name: Optional[str] = None) -> 
     if not data:
         raise InputValidationError("The file is empty — there's nothing in it to check.")
 
-    if suffix in (".csv", ".tsv"):
+    if suffix in (".csv", ".tsv", ".txt"):  # .txt: Excel's "Unicode Text" (tab-separated UTF-16) export
         rows = _read_csv(data)
         return _build_table(rows, sheet_names=[], sheet_name=None, auto_picked=False)
     return _load_xlsx(data, sheet_name)

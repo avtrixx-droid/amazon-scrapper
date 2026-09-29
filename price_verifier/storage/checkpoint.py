@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,17 +61,13 @@ def effective_brand(row: dict) -> str:
     """Brand a row is grouped under: the uploaded brand if non-blank, else
     the brand read off the product page, else "Unknown Brand". Brand is
     optional at upload, so this is what the report/sheets/downloads should
-    key on. Kept consistent with _EFFECTIVE_BRAND_SQL (same trimming)."""
+    key on."""
     for key in ("brand", "scraped_brand"):
         val = row.get(key)
         if val is not None and str(val).strip():
             return str(val).strip()
     return UNKNOWN_BRAND
 
-
-_EFFECTIVE_BRAND_SQL = (
-    f"COALESCE(NULLIF(TRIM(brand), ''), NULLIF(TRIM(scraped_brand), ''), '{UNKNOWN_BRAND}')"
-)
 
 
 def _now() -> str:
@@ -103,6 +100,7 @@ class RunConfig:
     tolerance_abs: float = config.DEFAULT_TOLERANCE_ABS
     tolerance_pct: float = config.DEFAULT_TOLERANCE_PCT
     concurrency: int = config.DEFAULT_CONCURRENCY
+    use_browser: bool = True
 
 
 def create_run(run_cfg: RunConfig, items: list[RunItemRow], db_path: Path = config.DB_PATH) -> str:
@@ -115,12 +113,12 @@ def create_run(run_cfg: RunConfig, items: list[RunItemRow], db_path: Path = conf
             conn.execute(
                 """INSERT INTO runs
                    (run_id, started_at, status, input_filename, pincode, price_source,
-                    tolerance_abs, tolerance_pct, concurrency, total_rows)
-                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
+                    tolerance_abs, tolerance_pct, concurrency, total_rows, use_browser)
+                   VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id, _now(), run_cfg.input_filename, run_cfg.pincode,
                     run_cfg.price_source, run_cfg.tolerance_abs, run_cfg.tolerance_pct,
-                    run_cfg.concurrency, len(items),
+                    run_cfg.concurrency, len(items), 1 if run_cfg.use_browser else 0,
                 ),
             )
             conn.executemany(
@@ -369,7 +367,33 @@ def get_run_items(run_id: str, status: Optional[str] = None, db_path: Path = con
         d = dict(r)
         d["effective_brand"] = effective_brand(d)
         out.append(d)
+    _canonicalize_brands(out)
     return out
+
+
+def _brand_key(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def _canonicalize_brands(rows: list[dict]) -> None:
+    """"Lapcare", "LAPCARE" and "lapcare " are one brand — one sheet, one
+    download, one email. Every spelling of a brand is replaced by its most
+    common spelling in this run (ties: the one with the most capitals
+    variety, i.e. "Lapcare" over "LAPCARE"/"lapcare", then alphabetical).
+    Only valid for grouping over a WHOLE run's rows, which is why it is
+    applied here and not in effective_brand()."""
+    spellings: dict[str, Counter] = {}
+    for d in rows:
+        name = d["effective_brand"]
+        spellings.setdefault(_brand_key(name), Counter())[" ".join(name.split())] += 1
+    canon = {}
+    for key, counts in spellings.items():
+        canon[key] = sorted(
+            counts.items(),
+            key=lambda kv: (-kv[1], not (kv[0] != kv[0].upper() and kv[0] != kv[0].lower()), kv[0]),
+        )[0][0]
+    for d in rows:
+        d["effective_brand"] = canon[_brand_key(d["effective_brand"])]
 
 
 # Statuses that represent a genuine pricing/listing problem worth emailing a
@@ -382,29 +406,16 @@ ISSUE_STATUSES = (
 
 
 def get_brands_with_issues(run_id: str, db_path: Path = config.DB_PATH) -> list[str]:
-    """Distinct EFFECTIVE brands (see effective_brand()) that have at least
-    one issue row, alphabetical — drives the per-brand download links on the
-    results page."""
-    placeholders = ",".join("?" * len(ISSUE_STATUSES))
-    with get_conn(db_path) as conn:
-        rows = conn.execute(
-            f"""SELECT DISTINCT {_EFFECTIVE_BRAND_SQL} AS eb FROM run_items
-                WHERE run_id = ? AND status IN ({placeholders})
-                ORDER BY eb COLLATE NOCASE""",
-            (run_id, *ISSUE_STATUSES),
-        ).fetchall()
-    return [r["eb"] for r in rows]
+    """Distinct EFFECTIVE brands (see effective_brand(), case-insensitively
+    merged) that have at least one issue row, alphabetical — drives the
+    per-brand download links on the results page."""
+    return [b["brand"] for b in get_brand_issue_counts(run_id, db_path=db_path)]
 
 
 def get_brand_issue_counts(run_id: str, db_path: Path = config.DB_PATH) -> list[dict]:
     """[{"brand": ..., "issues": n}] per effective brand with at least one
     issue row, alphabetical — the results page's per-brand download list."""
-    placeholders = ",".join("?" * len(ISSUE_STATUSES))
-    with get_conn(db_path) as conn:
-        rows = conn.execute(
-            f"""SELECT {_EFFECTIVE_BRAND_SQL} AS eb, COUNT(*) AS n FROM run_items
-                WHERE run_id = ? AND status IN ({placeholders})
-                GROUP BY eb ORDER BY eb COLLATE NOCASE""",
-            (run_id, *ISSUE_STATUSES),
-        ).fetchall()
-    return [{"brand": r["eb"], "issues": r["n"]} for r in rows]
+    counts: Counter = Counter(
+        r["effective_brand"] for r in get_run_items(run_id, db_path=db_path) if r["status"] in ISSUE_STATUSES
+    )
+    return [{"brand": b, "issues": n} for b, n in sorted(counts.items(), key=lambda kv: kv[0].casefold())]

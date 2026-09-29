@@ -207,7 +207,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self._build_v2()
         added = db.init_db(self.db_path)
         self.assertEqual(set(added), {"run_items.scraped_brand", "run_items.resolved_by", "run_items.last_attempt_at",
-                                      "runs.phase", "runs.stats_json"})
+                                      "runs.phase", "runs.stats_json", "runs.use_browser"})
         # the vendor's interrupted run is still detected and resumable
         incomplete = checkpoint.find_incomplete_run(db_path=self.db_path)
         self.assertEqual(incomplete["run_id"], "old2")

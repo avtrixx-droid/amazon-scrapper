@@ -71,9 +71,15 @@ def save_debug_html(asin: str, html: str | None, reason: str, source: str = "htt
         return None
 
 
-def prune_debug_html(max_age_days: int = 7) -> int:
-    """Delete day folders older than `max_age_days`. Returns how many were
-    removed. Folders not named YYYYMMDD are left alone."""
+MAX_TOTAL_BYTES = 200 * 1024 * 1024
+
+
+def prune_debug_html(max_age_days: int = 7, max_total_bytes: int = MAX_TOTAL_BYTES) -> int:
+    """Delete day folders older than `max_age_days`, then the oldest saved
+    pages until the folder is under `max_total_bytes`. Called at app start
+    AND at the start of every run (the app may stay open for weeks). Returns
+    how many folders/files were removed. Folders not named YYYYMMDD are left
+    alone."""
     removed = 0
     try:
         root = Path(config.DEBUG_HTML_DIR)
@@ -90,6 +96,19 @@ def prune_debug_html(max_age_days: int = 7) -> int:
                     removed += 1
             except Exception:
                 log.debug("could not prune %s", child, exc_info=True)
+        files = sorted((p for p in root.glob("*/*.html") if _DAY_DIR_RE.match(p.parent.name)),
+                       key=lambda p: p.stat().st_mtime)
+        total = sum(p.stat().st_size for p in files)
+        for p in files:
+            if total <= max_total_bytes:
+                break
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                total -= size
+                removed += 1
+            except OSError:
+                pass
     except Exception:
         log.debug("prune_debug_html failed", exc_info=True)
     return removed

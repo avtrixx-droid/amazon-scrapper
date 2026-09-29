@@ -107,7 +107,13 @@ class CsvIngestTests(unittest.TestCase):
 
     def test_unsupported_extension_raises(self):
         with self.assertRaises(InputValidationError):
-            parse_upload("batch.txt", b"asin,expected_price,brand\nB09W9FND7M,1499,Lapcare\n")
+            parse_upload("batch.pdf", b"asin,expected_price,brand\nB09W9FND7M,1499,Lapcare\n")
+
+    def test_txt_export_is_read_like_csv(self):
+        # Excel's "Unicode Text" export: tab-separated UTF-16 with a .txt name.
+        data = "asin\texpected_price\tbrand\nB09W9FND7M\t1499\tLapcare\n".encode("utf-16")
+        report = parse_upload("batch.txt", data)
+        self.assertEqual([(r.asin, r.expected_price) for r in report.valid], [("B09W9FND7M", 1499.0)])
 
     def test_header_only_file_raises(self):
         with self.assertRaises(InputValidationError):

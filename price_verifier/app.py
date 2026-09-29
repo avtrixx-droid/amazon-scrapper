@@ -170,14 +170,26 @@ def _fmt_duration(started: str | None, finished: str | None) -> str | None:
 
 # ── Run orchestration ──────────────────────────────────────────────────────
 
-def _init_run_state(run_id: str, total: int) -> None:
+def _claim_run(run_id: str, total: int) -> bool:
+    """Atomically: refuse if this run already has a live pipeline, else
+    register one. A double-clicked Resume/Retry must not start two pipelines
+    on the same rows (double fetching, and Pause would only stop one)."""
     with _RUN_LOCK:
-        _RUN_STATE[run_id] = {
-            "done": 0, "total": total, "matched": 0, "mismatched": 0,
-            "out_of_stock": 0, "failed": 0, "status": "running",
-            "started_at": time.time(), "phase": "fast", "phase_detail": {},
-            "loop": None, "cancel": None,
-        }
+        st = _RUN_STATE.get(run_id)
+        if st is not None and st["status"] == "running":
+            return False
+        _init_run_state_locked(run_id, total)
+        return True
+
+
+def _init_run_state_locked(run_id: str, total: int) -> None:
+    """Caller holds _RUN_LOCK."""
+    _RUN_STATE[run_id] = {
+        "done": 0, "total": total, "matched": 0, "mismatched": 0,
+        "out_of_stock": 0, "failed": 0, "status": "running",
+        "started_at": time.time(), "phase": "fast", "phase_detail": {},
+        "loop": None, "cancel": None,
+    }
 
 
 def _record_outcome(run_id: str, outcome) -> None:
@@ -243,8 +255,15 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
             checkpoint.mark_run_paused(run_id)
             final_status = "paused"
         else:
-            output_path = build_report(run_id)
-            checkpoint.finish_run(run_id, str(output_path))
+            # Every row is saved by now, so a report problem (file open in
+            # Excel, disk full) must not turn a finished run into "crashed":
+            # finish it anyway; /download rebuilds the report on demand.
+            try:
+                output_path = str(build_report(run_id))
+            except Exception:
+                log.exception("Run %s: report build failed; it will be rebuilt on download", run_id)
+                output_path = None
+            checkpoint.finish_run(run_id, output_path)
             final_status = "completed"
         with _RUN_LOCK:
             _RUN_STATE[run_id]["status"] = final_status
@@ -257,12 +276,22 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
 
 
 def _start_run(items: list[checkpoint.RunItemRow], run_cfg: checkpoint.RunConfig,
-               use_browser: bool, run_id: str | None = None) -> str:
+               use_browser: bool, run_id: str | None = None) -> str | None:
+    """Returns the run_id, or None if that run is already being processed."""
+    try:
+        from price_verifier.fetcher.browser_fallback import sweep_stale_profiles
+        from price_verifier.fetcher.debug_dump import prune_debug_html
+        prune_debug_html()          # the app may stay open for weeks
+        sweep_stale_profiles()
+    except Exception:
+        log.debug("pre-run cleanup failed", exc_info=True)
     if run_id is None:
         run_id = checkpoint.create_run(run_cfg, items)
+        _claim_run(run_id, total=len(items))
     else:
+        if not _claim_run(run_id, total=len(items)):
+            return None
         checkpoint.reopen_run_for_retry(run_id)
-    _init_run_state(run_id, total=len(items))
     thread = threading.Thread(target=_run_in_background, args=(run_id, items, run_cfg, use_browser), daemon=True)
     thread.start()
     return run_id
@@ -288,8 +317,9 @@ def _restart_existing_run(run_id: str):
         input_filename=run["input_filename"],
         price_source=run["price_source"], tolerance_abs=run["tolerance_abs"],
         tolerance_pct=run["tolerance_pct"], concurrency=run["concurrency"],
+        use_browser=bool(run.get("use_browser", 1)),
     )
-    _start_run(items, run_cfg, use_browser=True, run_id=run_id)
+    _start_run(items, run_cfg, use_browser=run_cfg.use_browser, run_id=run_id)
     return redirect(url_for("progress_view", run_id=run_id))
 
 
@@ -399,7 +429,8 @@ def start():
         checkpoint.RunItemRow(asin=r.asin, expected_price=r.expected_price, brand=(r.brand or "").strip())
         for r in entry["report"].valid
     ]
-    run_id = _start_run(items, run_cfg, use_browser=request.form.get("use_browser") == "1")
+    run_cfg.use_browser = request.form.get("use_browser") == "1"
+    run_id = _start_run(items, run_cfg, use_browser=run_cfg.use_browser)
     return redirect(url_for("progress_view", run_id=run_id))
 
 
@@ -431,10 +462,15 @@ def discard(run_id: str):
 
 @app.route("/progress/<run_id>")
 def progress_view(run_id: str):
-    if not _is_active(run_id):
+    with _RUN_LOCK:
+        in_memory = run_id in _RUN_STATE
+    if not in_memory:
+        # Not running in this app session (restarted app, old link): the
+        # live feed has nothing to show, so send them somewhere useful.
         run = checkpoint.get_run(run_id)
         if run and run["status"] == "completed":
             return redirect(url_for("results", run_id=run_id))
+        return redirect(url_for("history") if run else url_for("index"))
     return render_template("progress.html", run_id=run_id)
 
 
@@ -587,8 +623,10 @@ def main() -> None:
         from price_verifier.storage.db import init_db
         init_db(config.DB_PATH)
         try:
+            from price_verifier.fetcher.browser_fallback import sweep_stale_profiles
             from price_verifier.fetcher.debug_dump import prune_debug_html
             prune_debug_html()
+            sweep_stale_profiles()
         except Exception:
             pass
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()

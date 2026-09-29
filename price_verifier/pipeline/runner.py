@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable, Optional
@@ -148,6 +149,63 @@ class RunStats:
         return d
 
 
+
+class ChromeCallTimeout(Exception):
+    pass
+
+
+async def _chrome_call(fn, *args, timeout: float, on_abandon: Optional[Callable[[], None]] = None):
+    """Run a blocking Chrome/undetected-chromedriver call on its own DAEMON
+    thread with a timeout. asyncio.to_thread would use the loop's default
+    executor, which asyncio.run() joins with no timeout on shutdown — so one
+    call stuck forever (e.g. uc's first-run chromedriver download through a
+    proxy that stalls rather than refuses) would freeze the run, and Pause
+    could never finish it. Here the caller gets ChromeCallTimeout instead, the
+    thread is abandoned, and `on_abandon` (e.g. fetcher.close) runs on that
+    thread if the call ever does return, so a late-starting Chrome is quit
+    rather than orphaned."""
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    abandoned = threading.Event()
+
+    def deliver(result, exc):
+        if not fut.done():
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+
+    def target():
+        try:
+            result, exc = fn(*args), None
+        except BaseException as e:  # noqa: BLE001 — relayed to the awaiting coroutine
+            result, exc = None, e
+        if abandoned.is_set():
+            if on_abandon is not None:
+                try:
+                    on_abandon()
+                except Exception:
+                    pass
+            return
+        try:
+            loop.call_soon_threadsafe(deliver, result, exc)
+        except RuntimeError:  # loop already closed
+            if on_abandon is not None:
+                try:
+                    on_abandon()
+                except Exception:
+                    pass
+
+    threading.Thread(target=target, daemon=True, name="pv-chrome-call").start()
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout)
+    except asyncio.TimeoutError:
+        abandoned.set()
+        raise ChromeCallTimeout(f"Chrome did not respond within {timeout:.0f}s") from None
+    except asyncio.CancelledError:
+        abandoned.set()
+        raise
+
 @dataclass
 class PipelineTuning:
     """Every timing/limit knob, read from config at call time. Tests pass a
@@ -179,6 +237,8 @@ class PipelineTuning:
     browser_gap_max: float = 4.0
     browser_block_pause: float = 30.0
     browser_abort_block_streak: int = 3
+    browser_start_timeout: float = 180.0
+    browser_call_timeout: float = 120.0
 
     @classmethod
     def from_config(cls) -> "PipelineTuning":
@@ -209,6 +269,8 @@ class PipelineTuning:
             browser_gap_max=config.BROWSER_GAP_MAX_SECONDS,
             browser_block_pause=config.BROWSER_BLOCK_PAUSE_SECONDS,
             browser_abort_block_streak=config.BROWSER_ABORT_BLOCK_STREAK,
+            browser_start_timeout=config.BROWSER_START_TIMEOUT_SECONDS,
+            browser_call_timeout=config.BROWSER_CALL_TIMEOUT_SECONDS,
         )
 
 
@@ -537,7 +599,9 @@ class _Pipeline:
         self.stats.finalized += 1
         self.stats.status_counts[status] = self.stats.status_counts.get(status, 0) + 1
         self.stats.resolved_by[resolved_by] = self.stats.resolved_by.get(resolved_by, 0) + 1
-        if status not in (checkpoint.STATUS_MATCHED, checkpoint.STATUS_MISMATCHED) and html:
+        # Final answers (OOS / unavailable / not found / no buy box) are
+        # correct results, not parser puzzles — only unresolved pages are kept.
+        if status == checkpoint.STATUS_FAILED and html:
             await self._debug(item_asin, html, f"{status}: {reason}", source)
         if self.on_item_done is not None:
             try:
@@ -738,7 +802,12 @@ class _Pipeline:
         if not self.use_browser:
             await self._fail_many(works, "could not be verified (Chrome double-check is turned off)")
             return
-        available = self.browser_factory is not None or await asyncio.to_thread(browser_fallback.chrome_available)
+        available = self.browser_factory is not None
+        if not available:
+            try:
+                available = bool(await _chrome_call(browser_fallback.chrome_available, timeout=60.0))
+            except ChromeCallTimeout:
+                available = False
         self.stats.browser_available = available
         if not available:
             await self._fail_many(works, "could not be verified (Google Chrome not found for a double-check)")
@@ -752,10 +821,16 @@ class _Pipeline:
         remaining = list(works)
         try:
             try:
-                await asyncio.to_thread(fetcher.start)
+                await _chrome_call(fetcher.start, timeout=self.t.browser_start_timeout, on_abandon=fetcher.close)
             except Exception as e:
                 self.stats.browser_available = False
-                msg = str(e) if isinstance(e, browser_fallback.BrowserUnavailable) else "Chrome could not be started"
+                if isinstance(e, browser_fallback.BrowserUnavailable):
+                    msg = str(e)
+                elif isinstance(e, ChromeCallTimeout):
+                    msg = ("Chrome took too long to start — this network may be blocking the ChromeDriver "
+                           "download; retry later or on another network")
+                else:
+                    msg = "Chrome could not be started"
                 await self._fail_many(remaining, f"could not be verified ({msg})")
                 remaining = []
                 return
@@ -787,7 +862,7 @@ class _Pipeline:
         finally:
             st.duration_s = round(time.monotonic() - t0, 3)
             try:
-                await asyncio.to_thread(fetcher.close)
+                await _chrome_call(fetcher.close, timeout=60.0)
             except Exception:
                 logger.debug("BrowserFetcher.close raised", exc_info=True)
 
@@ -798,7 +873,11 @@ class _Pipeline:
         last_html = None
         was_block = False
         for attempt in (1, 2):
-            fetch = await asyncio.to_thread(fetcher.fetch, item.asin)
+            try:
+                fetch = await _chrome_call(fetcher.fetch, item.asin, timeout=self.t.browser_call_timeout)
+            except ChromeCallTimeout:
+                fetch = FetchResult(asin=item.asin, status_code=None, html=None,
+                                    error="browser_error:Timeout", source="browser")
             st.attempts += 1
             work.last_source = checkpoint.RESOLVED_BY_BROWSER
             await self._db(checkpoint.record_attempt, self.run_id, item.asin)
@@ -830,7 +909,7 @@ class _Pipeline:
             if was_block or fetch.error:
                 # Fresh Chrome + fresh profile — never retry on the flagged one.
                 try:
-                    await asyncio.to_thread(fetcher.restart)
+                    await _chrome_call(fetcher.restart, timeout=self.t.browser_start_timeout, on_abandon=fetcher.close)
                     st.rotations += 1
                 except Exception:
                     logger.warning("Chrome restart failed", exc_info=True)

@@ -136,7 +136,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 336 tests) runs offline:
+The whole suite (`tests/`, 348 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -150,6 +150,37 @@ To try the full app against the simulator by hand:
 python -m price_verifier.tests.sim_amazon --port 8765 --asins 300   # writes sim_batch.csv
 PV_MARKETPLACE_BASE_URL=http://127.0.0.1:8765 PV_DATA_DIR=/tmp/pvdata python -m price_verifier.app
 ```
+
+### Independent review
+
+A separate reviewer pass then went through correctness, robustness,
+Windows-specific behaviour and messy vendor sheets. Its findings are fixed,
+and each one has a test in `tests/test_regressions.py`:
+
+- **Price column choice.** An MRP column is no longer pre-selected over
+  "Discount Price" or "Price (incl. GST)". GST-inclusive beats exclusive,
+  and new/revised beats old.
+- **Excel CSV exports.** A CSV exported from Excel whose "₹" became "?" is
+  read correctly, and `.txt` "Unicode Text" exports are accepted.
+- **The ₹1 boundary is exact.** It no longer suffers floating-point false
+  flags.
+- **The % tolerance** is now labelled as what it does: it ignores more
+  differences.
+- **Brand spelling.** "Lapcare" and "LAPCARE" become one sheet, one download
+  and one email.
+- **Chrome can't freeze a run.** A Chrome start that hangs (for example, a
+  stalled ChromeDriver download) times out, and Pause always works.
+- **Report files open in Excel.** A report file left open in Excel no longer
+  turns a finished run into "crashed".
+- **Resume/Retry.** They reuse the Chrome choice made at upload, and a
+  double click cannot start two runs.
+- **Disk use is bounded.** Debug pages are kept only for rows that could not
+  be settled, they are capped at 200 MB, and they are pruned every run.
+  Stale Chrome profiles are swept.
+
+The Windows CI runner also exposed timing races in block handling that the
+Linux sandbox hid. They are fixed, and `SlowDiskTests` reproduces them with
+Windows-like disk latency.
 
 ### Known gaps
 

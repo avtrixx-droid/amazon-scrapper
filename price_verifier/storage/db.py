@@ -51,6 +51,7 @@ _COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("output_path", "TEXT"),
         ("phase", "TEXT"),                                   # fast | recovery | browser | done | cancelled
         ("stats_json", "TEXT"),                              # runner.RunStats.as_dict() of the latest pass
+        ("use_browser", "INTEGER NOT NULL DEFAULT 1"),       # Chrome double-check chosen at upload; reused by resume / retry
     ],
     "run_items": [
         ("run_id", "TEXT NOT NULL REFERENCES runs(run_id)"),

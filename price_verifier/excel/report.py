@@ -114,7 +114,8 @@ def _friendly_reason(reason: str | None) -> str | None:
 
 
 def _brand(r: dict) -> str:
-    return checkpoint.effective_brand(r)
+    # get_run_items() has already merged case variants ("LAPCARE" / "Lapcare").
+    return r.get("effective_brand") or checkpoint.effective_brand(r)
 
 
 def _write_table(ws: Worksheet, headers: list[str], rows: list[tuple], widths: dict[int, int] | None = None) -> None:
@@ -302,9 +303,21 @@ def build_report(run_id: str, output_path: Path | None = None, db_path: Path = c
 
     if output_path is None:
         output_path = config.OUTPUT_DIR / f"PriceVerification_{run_id}.xlsx"
+    return _save_workbook(wb, output_path)
+
+
+def _save_workbook(wb: Workbook, output_path: Path) -> Path:
+    """Save, or — if that file is open in Excel (Windows locks it; a Retry
+    rebuilds the same run's report) — save under a timestamped name instead
+    of failing."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
-    return output_path
+    try:
+        wb.save(str(output_path))
+        return output_path
+    except PermissionError:
+        alt = output_path.with_name(f"{output_path.stem}_{datetime.now():%Y%m%d_%H%M%S}{output_path.suffix}")
+        wb.save(str(alt))
+        return alt
 
 
 def build_brand_report(run_id: str, brand: str, output_path: Path | None = None, db_path: Path = config.DB_PATH) -> Path:
@@ -323,6 +336,4 @@ def build_brand_report(run_id: str, brand: str, output_path: Path | None = None,
     if output_path is None:
         safe_brand = re.sub(r"[^A-Za-z0-9._-]+", "_", brand).strip("_") or "brand"
         output_path = config.OUTPUT_DIR / f"PriceIssues_{safe_brand}_{run_id}.xlsx"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
-    return output_path
+    return _save_workbook(wb, output_path)

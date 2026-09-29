@@ -121,6 +121,8 @@ BROWSER_GAP_MIN_SECONDS = 2.0
 BROWSER_GAP_MAX_SECONDS = 4.0
 BROWSER_BLOCK_PAUSE_SECONDS = 30.0     # pause before restarting Chrome after a captcha/block
 BROWSER_ABORT_BLOCK_STREAK = 3         # consecutive rows Chrome can't settle -> stop, leave rest FAILED
+BROWSER_START_TIMEOUT_SECONDS = 180.0  # start/restart incl. first-run ChromeDriver download; then give up
+BROWSER_CALL_TIMEOUT_SECONDS = 120.0   # one page fetch in Chrome, worst case
 # Optional explicit Chrome/Chromium binary (else auto-detected like scraper.py).
 CHROME_BINARY = os.environ.get("PV_CHROME_BINARY") or None
 UC_CACHE_DIR = DATA_DIR / "uc_cache"   # undetected-chromedriver's chromedriver download cache

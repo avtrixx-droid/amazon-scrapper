@@ -81,6 +81,14 @@ BASE_HTML = """<!DOCTYPE html>
 <main>
 {% block content %}{% endblock %}
 </main>
+<script>
+// A POST button is one action: a double-click must not submit it twice.
+document.addEventListener('submit', function (e) {
+  e.target.querySelectorAll('button[type=submit], input[type=submit]').forEach(function (b) {
+    setTimeout(function () { b.disabled = true; }, 0);
+  });
+});
+</script>
 </body>
 </html>
 """
@@ -211,7 +219,7 @@ CONFIRM_HTML = """{% extends "base.html" %}
       <input type="number" step="0.01" min="0" id="tolerance_abs" name="tolerance_abs" value="{{ default_tolerance_abs }}">
     </div>
     <div>
-      <label for="tolerance_pct">Also flag if it differs by more than (%)</label>
+      <label for="tolerance_pct">…but ignore differences up to this % of the expected price (0 = off)</label>
       <input type="number" step="0.01" min="0" id="tolerance_pct" name="tolerance_pct" value="{{ default_tolerance_pct }}">
     </div>
     <div>
@@ -387,6 +395,7 @@ HISTORY_HTML = """{% extends "base.html" %}
         <form method="post" action="{{ url_for('resume', run_id=r.run_id) }}" class="inline-form">
           <button type="submit" class="btn-small">Resume</button>
         </form>
+        · <a href="{{ url_for('download', run_id=r.run_id) }}">Download what's checked so far</a>
       {% endif %}
     </td>
   </tr>

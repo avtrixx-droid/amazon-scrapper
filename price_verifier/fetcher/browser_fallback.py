@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from price_verifier import config
@@ -79,9 +80,37 @@ def _register_temp_dir(path: str) -> None:
 def _remove_temp_dir(path: Optional[str]) -> None:
     if not path:
         return
-    shutil.rmtree(path, ignore_errors=True)
-    with _TEMP_LOCK:
-        _LIVE_TEMP_DIRS.discard(path)
+    # On Windows, Chrome's child processes can hold profile files for a
+    # moment after quit(); retry briefly, and if it still won't go, keep it
+    # registered so the atexit sweep (or the next startup's
+    # sweep_stale_profiles) gets it.
+    for delay in (0.0, 0.5, 1.5):
+        if delay:
+            time.sleep(delay)
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            with _TEMP_LOCK:
+                _LIVE_TEMP_DIRS.discard(path)
+            return
+
+
+def sweep_stale_profiles(max_age_hours: float = 24.0) -> int:
+    """Delete leftover pvchrome_* temp profiles (from a crash, a kill, or a
+    locked file) older than `max_age_hours`. Called at app startup. Never
+    raises; returns how many were removed."""
+    removed = 0
+    try:
+        cutoff = time.time() - max_age_hours * 3600
+        for p in Path(tempfile.gettempdir()).glob("pvchrome_*"):
+            try:
+                if p.is_dir() and p.stat().st_mtime < cutoff:
+                    shutil.rmtree(p, ignore_errors=True)
+                    removed += 0 if p.exists() else 1
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return removed
 
 
 @atexit.register
