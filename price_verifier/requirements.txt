@@ -1,22 +1,21 @@
 # Amazon Price Verification Tool — dependencies.
 # Install into a dedicated venv, separate from the root AmazonScraper's
 # requirements.txt (that project pins undetected-chromedriver 3.5.5 /
-# selenium 4.15.0; this one needs the same two packages for the one-time
-# pincode session bootstrap, listed below so both tools can still share a
-# venv if you prefer — versions are compatible).
+# selenium 4.15.0; this one uses the same two for its final Chrome check,
+# at the same versions, so both tools can still share a venv if you
+# prefer).
 
 httpx[http2]==0.28.1
 # Default fetch backend (fetcher/http_client.py): Chrome TLS/HTTP2 impersonation.
 # If it can't be imported, FetchSession falls back to httpx automatically.
 curl_cffi==0.16.3
-selectolax==0.3.28
+# Pinned to the version the whole test suite runs against.
+selectolax==0.4.12
 openpyxl==3.1.5
 flask==3.1.3
 
-# Session bootstrap only (fetcher/session_bootstrap.py) — sets the batch
-# pincode once via a real browser, then hands off to plain HTTP for the
-# rest of the run. Guarded by a try/except ImportError in that module, so
-# the rest of the tool works without these installed (tests, ingest, Excel
-# output, UI) — but a real run needs them.
+# Final-pass "double-check in real Chrome" (fetcher/browser_fallback.py).
+# Imported lazily — the tool still runs without them, it just skips that pass.
 undetected-chromedriver==3.5.5
 selenium==4.15.0
+websockets==17.1
