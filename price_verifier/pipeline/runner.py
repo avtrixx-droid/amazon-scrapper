@@ -48,7 +48,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable, Optional
 
 from price_verifier import config
-from price_verifier.fetcher import browser_fallback
+from price_verifier.fetcher import browser_fallback, session_store
 from price_verifier.fetcher.http_client import FetchSession
 from price_verifier.fetcher.models import FetchResult, ParsedProduct
 from price_verifier.fetcher.parser import parse_product_page
@@ -384,8 +384,11 @@ class _SessionManager:
       - the replaced session is closed once its in-flight fetches drain.
     """
 
-    def __init__(self, factory: Callable[[], object]):
+    def __init__(self, factory: Callable[[], object], persist: bool = False):
         self._factory = factory
+        # Production only: hand the identity still in use at the end of the
+        # pass to the next run (see fetcher/session_store.py).
+        self._persist = persist
         self._session = None
         self.generation = 0
         self._blocked: set[int] = set()
@@ -477,6 +480,10 @@ class _SessionManager:
         return True
 
     async def close(self) -> None:
+        if self._persist and self._session is not None and self.generation not in self._blocked:
+            export = getattr(self._session, "export_state", None)
+            if callable(export):
+                session_store.save(export())
         for s in [self._session, *self._retired.values()]:
             if s is None:
                 continue
@@ -518,7 +525,12 @@ class _Pipeline:
         self.on_item_done = on_item_done
         self.on_phase = on_phase
         self.cancel_event = cancel_event
-        self.session_factory = session_factory or (lambda: FetchSession())
+        # The default (production) factory starts the run's first identity
+        # from the good session the previous run left behind, if any;
+        # take() consumes it, so every later identity is a fresh one.
+        self._persist_sessions = session_factory is None
+        self.session_factory = session_factory or (
+            lambda: FetchSession(initial_state=session_store.take()))
         self.browser_factory = browser_factory
         self.t = tuning or PipelineTuning.from_config()
         self.stats = RunStats(total_items=len(self.items))
@@ -778,7 +790,7 @@ class _Pipeline:
             escalation_window=t.block_escalation_window, decay_successes=t.block_decay_successes,
             jitter=t.rate_jitter,
         )
-        return _PassCtx(PHASE_FAST, checkpoint.RESOLVED_BY_HTTP, limiter, _SessionManager(self.session_factory),
+        return _PassCtx(PHASE_FAST, checkpoint.RESOLVED_BY_HTTP, limiter, _SessionManager(self.session_factory, persist=self._persist_sessions),
                         t.max_attempts_fast, t.fast_abort_block_streak, t.fast_abort_error_streak, self.stats.fast)
 
     def _recovery_ctx(self) -> _PassCtx:
@@ -790,7 +802,7 @@ class _Pipeline:
             jitter=t.rate_jitter,
         )
         return _PassCtx(PHASE_RECOVERY, checkpoint.RESOLVED_BY_RECOVERY, limiter,
-                        _SessionManager(self.session_factory), t.max_attempts_recovery,
+                        _SessionManager(self.session_factory, persist=self._persist_sessions), t.max_attempts_recovery,
                         t.recovery_abort_block_streak, t.recovery_abort_error_streak, self.stats.recovery)
 
     # ── Browser pass ─────────────────────────────────────────────────────────

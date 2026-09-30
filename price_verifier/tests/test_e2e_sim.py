@@ -48,10 +48,15 @@ EXPECTED_STATUS = {
 
 
 def quick_tuning() -> runner.PipelineTuning:
-    """Production request RATES (so the throttle model bites exactly as it
-    would against the real config), with the long pauses shortened so the
-    test runs in seconds rather than minutes."""
+    """The production pacing SHAPE (same AIMD rules, same relative steps)
+    at 3x the production rates, with the long pauses shortened, so a test
+    run takes seconds instead of the minutes the deliberately patient
+    production defaults would. The simulator's throttle is unchanged, so
+    blocks and rotations still happen. The PV_SIM_BENCH benchmark below runs
+    the exact production tuning."""
     t = runner.PipelineTuning.from_config()
+    for name in ("fast_initial_rps", "fast_min_rps", "fast_max_rps", "rate_increase_step", "recovery_rps"):
+        setattr(t, name, getattr(t, name) * 3)
     t.block_pause_base = 1.0
     t.block_pause_max = 3.0
     t.recovery_pause = 1.0

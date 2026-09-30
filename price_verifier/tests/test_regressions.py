@@ -26,7 +26,6 @@ from openpyxl import Workbook, load_workbook
 
 from price_verifier.excel import report
 from price_verifier.ingest.column_detect import detect_columns, load_table, parse_price
-from price_verifier.pipeline import runner
 from price_verifier.pipeline.compare import prices_match
 from price_verifier.storage import checkpoint
 from price_verifier.storage.db import init_db

@@ -88,14 +88,19 @@ REQUEST_TIMEOUT_SECONDS = 20.0
 # Rows still unresolved after all passes end FAILED and are retryable.
 
 # Pass 1 — adaptive rate limiter (requests per second across all workers).
-FAST_INITIAL_RPS = 2.0
-FAST_MIN_RPS = 0.5
-FAST_MAX_RPS = 6.0
-RATE_INCREASE_STEP = 0.25          # additive increase ...
+# Patient by default: the tool runs from ONE office internet connection, and
+# every source on scraping Amazon without proxies says a single IP only
+# gets a few requests per minute before it is pushed back. So it starts
+# slow and speeds up only while Amazon keeps answering normally — a block
+# costs far more time (pause + fresh session) than a gentle start does.
+FAST_INITIAL_RPS = 0.5
+FAST_MIN_RPS = 0.15
+FAST_MAX_RPS = 2.0
+RATE_INCREASE_STEP = 0.15          # additive increase ...
 RATE_INCREASE_EVERY = 10           # ... after this many consecutive successes
-RATE_JITTER_FRACTION = 0.25        # +/- spacing jitter so requests aren't metronomic
-BLOCK_PAUSE_BASE_SECONDS = 15.0    # global pause after a block event (doubles on repeats) ...
-BLOCK_PAUSE_MAX_SECONDS = 60.0     # ... capped here
+RATE_JITTER_FRACTION = 0.3         # +/- spacing jitter so requests aren't metronomic
+BLOCK_PAUSE_BASE_SECONDS = 20.0    # global pause after a block event (doubles on repeats) ...
+BLOCK_PAUSE_MAX_SECONDS = 90.0     # ... capped here
 BLOCK_ESCALATION_WINDOW_SECONDS = 120.0  # blocks closer together than this escalate the pause
 BLOCK_DECAY_SUCCESSES = 25         # this many successes in a row step the escalation back down
 MAX_ATTEMPTS_FAST = 2              # per row, in pass 1, before deferring to pass 2
@@ -104,8 +109,8 @@ FAST_ABORT_ERROR_STREAK = 30       # consecutive failed requests of any kind (e.
 RETRY_BACKOFF_SECONDS = 1.5        # pause before re-trying a non-block error (timeout, 5xx, odd page)
 
 # Pass 2 — recovery: fresh identity, slow and steady.
-RECOVERY_PAUSE_SECONDS = 20.0
-RECOVERY_RPS = 0.5
+RECOVERY_PAUSE_SECONDS = 45.0
+RECOVERY_RPS = 0.25
 RECOVERY_CONCURRENCY = 2
 MAX_ATTEMPTS_RECOVERY = 2
 RECOVERY_ABORT_BLOCK_STREAK = 3

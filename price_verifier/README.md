@@ -65,6 +65,18 @@ fingerprint, so the request looks like a real browser to Amazon.
   `lc-acbin=en_IN`.
 - **Rotation:** a blocked identity is never reused. `rotate()` switches to a
   fresh cookie jar and a fresh fingerprint.
+- **Returning visitor** (`fetcher/session_store.py`): at the end of a run,
+  the identity still in use — only if Amazon was serving it product pages —
+  is saved (cookies plus the matching Chrome fingerprint) to
+  `data/session_state.json`. The next run's first session starts from it
+  instead of an empty cookie jar. It is offered once (a blocked one is
+  rotated away as usual), expires after 12 hours, and only applies to the
+  same marketplace URL.
+- **"Continue shopping" page:** Amazon sometimes shows a page with just a
+  "Continue shopping" button. The session clicks it once (a GET to
+  `/errors/validateCaptcha` with the page's hidden fields) instead of
+  discarding a still-usable identity. Anything with something to solve —
+  a captcha image, a text box — is never touched and is treated as a block.
 - **Fallback:** httpx is used only if curl_cffi cannot load.
 
 ### 3. A three-pass pipeline that aims for zero failures (`pipeline/runner.py`)
@@ -74,6 +86,17 @@ fingerprint, so the request looks like a real browser to Amazon.
 | 1. Fast | Shared session, requests paced by an **AIMD rate limiter** (`pipeline/rate_limiter.py`): it speeds up slowly while things go well, halves on a block, pauses globally, and rotates identity **once per block event** | Most rows finish here |
 | 2. Recovery | A fresh identity after a short pause, at a slow fixed rate | Rows that were rate-limited in pass 1 |
 | 3. Browser | Real Chrome through undetected-chromedriver, one row at a time (`fetcher/browser_fallback.py`) | Rows plain HTTP still could not settle (or ambiguous pages) |
+
+**Pacing is deliberately patient.** The tool runs from one office internet
+connection with no proxies, and a single IP only gets a limited number of
+requests before Amazon pushes back — and a block costs far more time (a
+pause plus a fresh session) than a gentle start. So pass 1 starts at 0.5
+requests/second and speeds up (to at most 2/second) only while Amazon keeps
+answering normally; on a block it halves and pauses 20–90 s. Expect roughly
+10–60 minutes per 1,000 ASINs depending on how much Amazon tolerates that
+day — still several times faster than the vendor's 4-hour tool, and without
+the failures. The numbers live in `config.py` (`FAST_*`, `BLOCK_PAUSE_*`,
+`RECOVERY_*`).
 
 Only rows that survive all three passes end as **Could Not Verify**. The
 results page then shows a **Retry** button that re-checks just those rows
@@ -125,7 +148,7 @@ Results against it:
 
 | Check | Result |
 |---|---|
-| `test_e2e_sim` — 40 ASINs, realistic throttle, production request rates | **0 failed**, all prices, MRPs, sellers, brands and statuses correct; well under a minute |
+| `test_e2e_sim` — 40 ASINs, realistic throttle, production pacing rules at 3× speed | **0 failed**, all prices, MRPs, sellers, brands and statuses correct; well under a minute |
 | `test_e2e_sim` — 30 ASINs, harsh throttle (tiny bursts, 3 req/s IP ceiling) | **0 failed**; blocks happen and are absorbed by rotation and the recovery pass |
 | Benchmark (`PV_SIM_BENCH=1`) — 300 ASINs, full production timings | **0 failed**, 147 s (about 120 ASINs/min, so about 8 min per 1,000; the vendor's tool takes 4 h) |
 | Frozen PyInstaller binary: upload → auto-map → run → download | 40 ASINs in about 19 s, 0 failed; confirms curl_cffi is bundled correctly |
@@ -136,7 +159,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 348 tests) runs offline:
+The whole suite (`tests/`, 359 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -183,6 +206,17 @@ Linux sandbox hid. They are fixed, and `SlowDiskTests` reproduces them with
 Windows-like disk latency.
 
 ### Known gaps
+
+- **Unverified against the live site:** the "Continue shopping" click-through
+  follows the page layout reported by others; it is written to do nothing
+  unless the page matches exactly, so a different layout just falls back to
+  the normal block handling. The first live run's `data/debug_html/` pages
+  will confirm it.
+- **Offers-page fallback — not built yet, on purpose.** Amazon's lightweight
+  "all offers" page (`/gp/product/ajax/aodAjaxMain/`) could be an extra HTTP
+  check before Chrome, and it names every seller. Its layout differs between
+  signed-in and anonymous visitors, and a misread price is worse than "could
+  not verify", so it waits for real sample pages from a live run.
 
 - **"Lowest price across all sellers"** (`DEFAULT_PRICE_SOURCE = "lowest"`)
   is not implemented. A product page only shows the Buy Box price, so this
@@ -265,7 +299,8 @@ price_verifier/
 │   ├── column_detect.py      load_table / detect_columns / parse_rows — content + header based column detection
 │   └── input_parser.py       ParsedRow / ParseReport / InputValidationError (+ parse_upload wrapper)
 ├── fetcher/
-│   ├── http_client.py        FetchSession: curl_cffi Chrome impersonation, warm-up, rotate(); never raises
+│   ├── http_client.py        FetchSession: curl_cffi Chrome impersonation, warm-up, rotate(), "continue shopping" click-through; never raises
+│   ├── session_store.py      Saves one known-good session for the next run ("returning visitor"), taken once, 12 h expiry
 │   ├── browser_fallback.py   BrowserFetcher: real Chrome via undetected-chromedriver (pass 3)
 │   ├── parser.py             ALL Amazon HTML selectors (scoped to price / buy-box containers)
 │   ├── debug_dump.py         Saves unparseable pages to data/debug_html (7-day prune)
