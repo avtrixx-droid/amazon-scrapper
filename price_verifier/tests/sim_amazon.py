@@ -30,6 +30,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 _DP_RE = re.compile(r"^/(?:[^/]+/)?dp/([A-Z0-9]{10})")
+_AOD_RE = re.compile(r"^/gp/product/ajax/aodAjaxMain")
+_ASIN_PARAM_RE = re.compile(r"[?&]asin=([A-Z0-9]{10})")
 
 
 @dataclass
@@ -68,6 +70,7 @@ class SimStats:
     identities: int = 0
     flagged_identities: int = 0
     homepage_hits: int = 0
+    offers_ok: int = 0
     by_identity: dict = field(default_factory=dict)
 
 
@@ -169,6 +172,36 @@ def render_product(p: SimProduct, padding_kb: int = 200) -> str:
 </div></div></body></html>"""
 
 
+def render_offers(p: SimProduct, layout: str = "standard") -> str:
+    """Amazon's "all offers" panel (aodAjaxMain). layout="changed" renames
+    every id, the way an Amazon redesign would — the pipeline must then
+    refuse to use this page at all."""
+    others = "".join(
+        f'<div id="aod-offer" class="a-section"><div id="aod-offer-price"><span class="a-price">'
+        f'<span class="a-offscreen">₹{_fmt(p.price + 30 + k)}</span></span></div>'
+        f'<div id="aod-offer-soldBy"><span class="a-size-small">Sold by</span>'
+        f'<a class="a-size-small a-link-normal" href="/gp/aag/main?seller=S{k}">Other Seller {k}</a></div></div>'
+        for k in range(3)
+    ) if p.price is not None else ""
+    pinned = ""
+    if p.kind == "in_stock":
+        pinned = (
+            f'<div id="aod-pinned-offer" class="a-section"><div id="aod-offer-price">'
+            f'<span class="a-price" data-a-size="xl"><span class="a-offscreen">₹{_fmt(p.price)}</span></span>'
+            f'<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">₹{_fmt(p.mrp)}</span></span>'
+            f'</div><div id="aod-offer-soldBy"><span class="a-size-small">Sold by</span>'
+            f'<a class="a-size-small a-link-normal" href="/gp/aag/main?seller=X">{p.seller}</a></div></div>'
+        )
+    html = (
+        f'<div id="aod-container" data-asin="{p.asin}"><div id="aod-asin-title">'
+        f'<h5 id="aod-asin-title-text">{p.title}</h5></div>{pinned}'
+        f'<div id="aod-offer-list">{others}</div></div>'
+    )
+    if layout == "changed":
+        html = html.replace('id="aod-', 'id="offers2-')
+    return html
+
+
 ROBOT_PAGE = """<!DOCTYPE html><html><head><title dir="ltr">Sorry! Something went wrong!</title></head>
 <body><div><a href="/ref=cs_503_logo"><img src="https://images-eu.ssl-images-amazon.com/images/G/31/x-locale/common/amazon-logo.png"></a>
 <p>Sorry! Something went wrong on our end. Please go back and try again or go to Amazon's home page.</p>
@@ -184,8 +217,12 @@ class SimAmazon:
     """Owns the server thread, catalog, throttle state and stats."""
 
     def __init__(self, catalog: dict[str, SimProduct], policy: Optional[ThrottlePolicy] = None,
-                 host: str = "127.0.0.1", port: int = 0, padding_kb: int = 200):
+                 host: str = "127.0.0.1", port: int = 0, padding_kb: int = 200,
+                 aod_layout: str = "standard", product_page_blocked: Optional[set] = None):
         self.catalog = catalog
+        self.aod_layout = aod_layout
+        # ASINs whose /dp/ page is always a robot page (the offers page still works)
+        self.product_page_blocked = set(product_page_blocked or ())
         self.policy = policy or ThrottlePolicy()
         self.padding_kb = padding_kb
         self.stats = SimStats()
@@ -282,7 +319,8 @@ class SimAmazon:
             return
 
         m = _DP_RE.match(path)
-        if not m:
+        aod = None if m else (_AOD_RE.match(path) and _ASIN_PARAM_RE.search(handler.path))
+        if not m and not aod:
             self._send(handler, 404, NOT_FOUND_PAGE)
             return
 
@@ -296,9 +334,20 @@ class SimAmazon:
             self._send(handler, 503, ROBOT_PAGE)
             return
 
-        product = self.catalog.get(m.group(1))
+        asin = (m or aod).group(1)
+        product = self.catalog.get(asin)
         if product is None or product.kind == "not_found":
             self._send(handler, 404, NOT_FOUND_PAGE)
+            return
+        if aod:
+            with self._lock:
+                self.stats.offers_ok += 1
+            self._send(handler, 200, render_offers(product, self.aod_layout))
+            return
+        if asin in self.product_page_blocked:
+            with self._lock:
+                self.stats.blocked += 1
+            self._send(handler, 503, ROBOT_PAGE)
             return
         with self._lock:
             self.stats.product_ok += 1

@@ -174,3 +174,25 @@ class StuckChromeStartTests(PipelineHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentCountTests(unittest.TestCase):
+    """Rows finishing at the same moment (many workers) must never leave
+    the run's totals stale — the results page's Retry button and the
+    history page read them."""
+
+    def test_parallel_row_writes_keep_run_totals_exact(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "t.db"
+            init_db(db)
+            items = [checkpoint.RunItemRow(asin=f"B0CONC{i:04d}", expected_price=10.0) for i in range(60)]
+            run_id = checkpoint.create_run(checkpoint.RunConfig(input_filename="t.csv"), items, db_path=db)
+            # first every row fails, then a retry settles all of them — in parallel both times
+            for status in (checkpoint.STATUS_FAILED, checkpoint.STATUS_MATCHED):
+                with ThreadPoolExecutor(16) as pool:
+                    list(pool.map(lambda it: checkpoint.mark_item_result(
+                        run_id, it.asin, status, actual_price=10.0, db_path=db), items))
+            run = checkpoint.get_run(run_id, db_path=db)
+            self.assertEqual((run["matched"], run["failed"]), (60, 0))

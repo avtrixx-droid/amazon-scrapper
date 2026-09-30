@@ -670,3 +670,78 @@ def parse_product_page(html: str, asin: str) -> ParsedProduct:
 
     result.mrp = safe(_extract_mrp, core, result.price)
     return result
+
+
+# ── Amazon's "all offers" page (/gp/product/ajax/aodAjaxMain) ────────────────
+# A much smaller page than the product page, listing the featured ("pinned")
+# offer first. Used only as an extra check for rows the product page could
+# not settle — and the pipeline only uses it after it has agreed with the
+# product page on real rows of the same run (see runner._OffersCheck), so a
+# layout this parser doesn't understand can never produce a wrong price.
+# Deliberately strict: anything short of exactly one clear pinned price is
+# "unknown", never a guess.
+
+_AOD_CONTAINERS = "#aod-container, #all-offers-display, #aod-offer-list, #aod-pinned-offer"
+
+
+def _aod_seller(pinned) -> str | None:
+    sold_by = pinned.css_first("#aod-offer-soldBy")
+    if sold_by is None:
+        return None
+    link = sold_by.css_first("a")
+    if link is not None and _clean(link.text()):
+        return _normalize_seller(link.text())
+    # "Sold by  Amazon" without a link: the value follows the label.
+    texts = [_clean(n.text()) for n in sold_by.css("span") if _clean(n.text())]
+    texts = [t for t in texts if _label_key(t) != "sold by"]
+    return _normalize_seller(texts[0]) if texts else None
+
+
+def parse_offers_page(html: str, asin: str) -> ParsedProduct:
+    """ParsedProduct(page_kind="product", price, seller, title) only when the
+    page has a pinned (featured) offer with exactly one clear price and is
+    about this ASIN. captcha / blocked / not_found pages are recognised like
+    the product page's. Everything else — no pinned offer, several prices,
+    an unfamiliar layout — is page_kind="unknown". Never raises."""
+    try:
+        if not html:
+            return ParsedProduct(page_kind="unknown")
+        lower = html.lower()
+        title = _page_title(lower)
+        if "robot check" in title or any(p in lower for p in _CAPTCHA_INDICATORS):
+            return ParsedProduct(page_kind="captcha")
+        if title.startswith(_BLOCK_TITLE_PREFIXES) or any(p in lower for p in _BLOCK_INDICATORS):
+            return ParsedProduct(page_kind="blocked")
+        if not asin or asin.lower() not in lower:
+            return ParsedProduct(page_kind="unknown")
+
+        tree = HTMLParser(html)
+        if tree.css_first(_AOD_CONTAINERS) is None:
+            if "page not found" in title or any(p in lower for p in _NOT_FOUND_INDICATORS):
+                return ParsedProduct(page_kind="not_found")
+            return ParsedProduct(page_kind="unknown")
+        pinned = tree.css_first("#aod-pinned-offer")
+        if pinned is None:
+            return ParsedProduct(page_kind="unknown")
+
+        prices = set()
+        for price_node in pinned.css(".a-price"):
+            if _is_strike_or_unit_price(price_node):
+                continue
+            val = parse_money(_node_text(price_node.css_first(".a-offscreen"))) or _whole_fraction(price_node)
+            if val:
+                prices.add(round(val, 2))
+        if len(prices) != 1:
+            return ParsedProduct(page_kind="unknown")
+
+        title_node = tree.css_first("#aod-asin-title-text")
+        return ParsedProduct(
+            page_kind="product",
+            price=prices.pop(),
+            seller=_aod_seller(pinned),
+            title=_clean(title_node.text()) if title_node is not None else None,
+            is_in_stock=True,
+        )
+    except Exception:
+        log.warning("parse_offers_page failed for %s", asin, exc_info=True)
+        return ParsedProduct(page_kind="unknown")

@@ -85,7 +85,20 @@ fingerprint, so the request looks like a real browser to Amazon.
 |---|---|---|
 | 1. Fast | Shared session, requests paced by an **AIMD rate limiter** (`pipeline/rate_limiter.py`): it speeds up slowly while things go well, halves on a block, pauses globally, and rotates identity **once per block event** | Most rows finish here |
 | 2. Recovery | A fresh identity after a short pause, at a slow fixed rate | Rows that were rate-limited in pass 1 |
+| + Offers page | Amazon's lightweight "all offers" page (`/gp/product/ajax/aodAjaxMain`, `config.OFFERS_PAGE_PATH`) — **only if it proved itself this run** (see below) | Rows still unsettled, before the slow Chrome step |
 | 3. Browser | Real Chrome through undetected-chromedriver, one row at a time (`fetcher/browser_fallback.py`) | Rows plain HTTP still could not settle (or ambiguous pages) |
+
+**The offers page checks itself before it is trusted.** During pass 1, a few
+rows the product page has already settled are also read from the offers page
+(at most `OFFERS_MAX_SAMPLES`, paced like any other request). Only if it
+agreed with the product page — same price, same seller — on
+`OFFERS_SAMPLES_REQUIRED` rows and never disagreed is it used for the
+leftover rows of that run. If Amazon serves a layout the parser doesn't
+understand, or it ever disagrees, it stays off and those rows go to Chrome
+exactly as before. The offers page only ever *confirms a price*: anything
+else it says (a 404, no featured offer) is left for Chrome. The sample pages
+are kept in `data/debug_html/` ("offers-sample …") and the verdict is on the
+report's Run Info sheet.
 
 **Pacing is deliberately patient.** The tool runs from one office internet
 connection with no proxies, and a single IP only gets a limited number of
@@ -150,7 +163,8 @@ Results against it:
 |---|---|
 | `test_e2e_sim` — 40 ASINs, realistic throttle, production pacing rules at 3× speed | **0 failed**, all prices, MRPs, sellers, brands and statuses correct; well under a minute |
 | `test_e2e_sim` — 30 ASINs, harsh throttle (tiny bursts, 3 req/s IP ceiling) | **0 failed**; blocks happen and are absorbed by rotation and the recovery pass |
-| Benchmark (`PV_SIM_BENCH=1`) — 300 ASINs, full production timings | **0 failed**, 147 s (about 120 ASINs/min, so about 8 min per 1,000; the vendor's tool takes 4 h) |
+| Benchmark (`PV_SIM_BENCH=1`) — 300 ASINs, full production timings (patient pacing) | **0 failed, 0 blocks**, 220 s (about 82 ASINs/min, so about 12 min per 1,000; the vendor's tool takes 4 h). The earlier faster pacing did it in 147 s but hit 2 blocks. |
+| `test_offers_fallback` — product pages always blocked, offers page working | Settled from the offers page with the right price and seller, no Chrome needed; a redesigned offers page is never trusted (rows stay Could Not Verify) |
 | Frozen PyInstaller binary: upload → auto-map → run → download | 40 ASINs in about 19 s, 0 failed; confirms curl_cffi is bundled correctly |
 | Retry flow: an ASIN blocked permanently, then unblocked | Ends as Could Not Verify, then Retry resolves it and the report updates |
 
@@ -159,7 +173,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 359 tests) runs offline:
+The whole suite (`tests/`, 372 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -201,6 +215,11 @@ and each one has a test in `tests/test_regressions.py`:
   be settled, they are capped at 200 MB, and they are pruned every run.
   Stale Chrome profiles are swept.
 
+Also fixed since: a row's result and the run's totals are now written in one
+locked transaction — two rows finishing at the same instant could leave the
+totals stale (e.g. "1 could not verify" when every row matched), which also
+mislabelled the Retry button.
+
 The Windows CI runner also exposed timing races in block handling that the
 Linux sandbox hid. They are fixed, and `SlowDiskTests` reproduces them with
 Windows-like disk latency.
@@ -212,11 +231,10 @@ Windows-like disk latency.
   unless the page matches exactly, so a different layout just falls back to
   the normal block handling. The first live run's `data/debug_html/` pages
   will confirm it.
-- **Offers-page fallback — not built yet, on purpose.** Amazon's lightweight
-  "all offers" page (`/gp/product/ajax/aodAjaxMain/`) could be an extra HTTP
-  check before Chrome, and it names every seller. Its layout differs between
-  signed-in and anonymous visitors, and a misread price is worse than "could
-  not verify", so it waits for real sample pages from a live run.
+- **Offers-page layout is unverified on amazon.in.** Its parser follows the
+  layout others report; the per-run self-check means a different real
+  layout just leaves it switched off. The first live run's "offers-sample"
+  pages show which it was.
 
 - **"Lowest price across all sellers"** (`DEFAULT_PRICE_SOURCE = "lowest"`)
   is not implemented. A product page only shows the Buy Box price, so this

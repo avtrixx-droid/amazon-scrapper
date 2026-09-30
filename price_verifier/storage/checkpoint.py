@@ -53,6 +53,7 @@ OUT_OF_STOCK_BUCKET = (STATUS_OUT_OF_STOCK, STATUS_UNAVAILABLE, STATUS_NOT_FOUND
 RESOLVED_BY_HTTP = "http"
 RESOLVED_BY_RECOVERY = "recovery"
 RESOLVED_BY_BROWSER = "browser"
+RESOLVED_BY_OFFERS = "offers"   # Amazon's "all offers" page, once validated for the run
 
 UNKNOWN_BRAND = "Unknown Brand"
 
@@ -218,17 +219,28 @@ def mark_item_result(
     `resolved_by` is which fetch path produced the answer (RESOLVED_BY_*);
     `scraped_brand` is the brand read off the product page, if any."""
     with get_conn(db_path) as conn:
-        conn.execute(
-            """UPDATE run_items
-               SET status = ?, actual_price = ?, mrp = ?, seller = ?, product_title = ?, url = ?,
-                   error_reason = ?, checked_at = ?, scraped_brand = ?, resolved_by = ?
-               WHERE run_id = ? AND asin = ?""",
-            (status, actual_price, mrp, seller, product_title, url, error_reason, _now(),
-             scraped_brand, resolved_by, run_id, asin),
-        )
-        # Recompute counts from run_items rather than incrementing blindly —
-        # a row retried across a resume (failed -> matched) must not double-count.
-        _recompute_run_counts(conn, run_id)
+        # One IMMEDIATE transaction (takes the write lock up front): the row
+        # update and the recount must not interleave with another row's, or
+        # a recount that read the table before the other row's update could
+        # be written AFTER it — leaving stale totals (e.g. failed=1 when
+        # every row matched, which also mislabels the Retry button).
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """UPDATE run_items
+                   SET status = ?, actual_price = ?, mrp = ?, seller = ?, product_title = ?, url = ?,
+                       error_reason = ?, checked_at = ?, scraped_brand = ?, resolved_by = ?
+                   WHERE run_id = ? AND asin = ?""",
+                (status, actual_price, mrp, seller, product_title, url, error_reason, _now(),
+                 scraped_brand, resolved_by, run_id, asin),
+            )
+            # Recompute counts from run_items rather than incrementing blindly —
+            # a row retried across a resume (failed -> matched) must not double-count.
+            _recompute_run_counts(conn, run_id)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def mark_items_failed(

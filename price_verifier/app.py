@@ -57,9 +57,10 @@ _RUN_STATE: dict[str, dict] = {}
 _RUN_LOCK = threading.Lock()
 
 _PHASE_LABELS = {
-    "fast": "Pass 1 of 3 — checking prices",
-    "recovery": "Pass 2 of 3 — re-checking rows Amazon rate-limited, with a fresh session",
-    "browser": "Pass 3 of 3 — double-checking remaining rows in Google Chrome",
+    "fast": "Checking prices",
+    "recovery": "Re-checking rows Amazon slowed down, with a fresh session",
+    "offers": "Re-checking the remaining rows on Amazon's offers page",
+    "browser": "Final check of the remaining rows in Google Chrome",
     "done": "Finishing up — building your report",
     "cancelled": "Pausing — saving progress",
 }

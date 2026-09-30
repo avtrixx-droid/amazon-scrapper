@@ -394,7 +394,7 @@ class FetchSession:
                                        elapsed_ms=_ms_since(started))
             ident.inflight += 1
             try:
-                return await self._fetch_on(ident, asin, started)
+                return await self._fetch_on(ident, asin, started, f"/dp/{asin}")
             finally:
                 ident.inflight -= 1
                 if ident.retired and ident.inflight <= 0:
@@ -404,6 +404,32 @@ class FetchSession:
             return FetchResult(asin=asin, status_code=None, html=None,
                                error=f"http_error:{type(exc).__name__}",
                                elapsed_ms=_ms_since(started))
+
+    async def fetch_offers(self, asin: str) -> FetchResult:
+        """GET Amazon's "all offers" page for `asin` (config.OFFERS_PAGE_PATH)
+        on the current identity, as the product page's own offers panel
+        does. Same error contract as fetch(); never raises."""
+        started = time.perf_counter()
+        try:
+            ident = self._identity
+            if self._closed or ident is None:
+                return FetchResult(asin=asin, status_code=None, html=None,
+                                   error="http_error:SessionClosed", source="offers")
+            ident.inflight += 1
+            try:
+                result = await self._fetch_on(ident, asin, started, config.OFFERS_PAGE_PATH.format(asin=asin),
+                                              referer=f"{self._base_url}/dp/{asin}")
+                result.source = "offers"
+                return result
+            finally:
+                ident.inflight -= 1
+                if ident.retired and ident.inflight <= 0:
+                    await self._dispose(ident)
+        except Exception as exc:
+            log.debug("unexpected offers fetch failure for %s", asin, exc_info=True)
+            return FetchResult(asin=asin, status_code=None, html=None,
+                               error=f"http_error:{type(exc).__name__}", elapsed_ms=_ms_since(started),
+                               source="offers")
 
     async def rotate(self) -> None:
         try:
@@ -542,10 +568,11 @@ class FetchSession:
         except Exception:
             log.debug("warm-up GET / failed (ignored)", exc_info=True)
 
-    async def _fetch_on(self, ident: _Identity, asin: str, started: float) -> FetchResult:
+    async def _fetch_on(self, ident: _Identity, asin: str, started: float, path: str,
+                        referer: str | None = None) -> FetchResult:
         mapper = _map_curl_exception if ident.backend == "curl_cffi" else _map_httpx_exception
         try:
-            resp = await ident.client.get(f"/dp/{asin}")
+            resp = await ident.client.get(path, headers={"Referer": referer} if referer else None)
         except Exception as exc:
             return FetchResult(asin=asin, status_code=None, html=None,
                                error=mapper(exc), elapsed_ms=_ms_since(started))

@@ -116,6 +116,16 @@ MAX_ATTEMPTS_RECOVERY = 2
 RECOVERY_ABORT_BLOCK_STREAK = 3
 RECOVERY_ABORT_ERROR_STREAK = 10
 
+# Extra HTTP check — Amazon's lightweight "all offers" page, tried for rows
+# the product page couldn't settle, before Chrome. Only switched on for a run
+# after it has agreed with the product page on OFFERS_SAMPLES_REQUIRED real
+# rows of that same run (and never disagreed); otherwise it stays off. The
+# path is config so a layout change on Amazon's side is a one-line fix.
+OFFERS_FALLBACK_ENABLED = True
+OFFERS_PAGE_PATH = "/gp/product/ajax/aodAjaxMain/ref=dp_aod_NEW_mbc?asin={asin}&pc=dp"
+OFFERS_SAMPLES_REQUIRED = 3
+OFFERS_MAX_SAMPLES = 6
+
 # Pass 3 — real Chrome fallback (fetcher/browser_fallback.py).
 BROWSER_FALLBACK_ENABLED = True
 BROWSER_HEADLESS = True

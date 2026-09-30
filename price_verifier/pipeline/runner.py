@@ -51,7 +51,7 @@ from price_verifier import config
 from price_verifier.fetcher import browser_fallback, session_store
 from price_verifier.fetcher.http_client import FetchSession
 from price_verifier.fetcher.models import FetchResult, ParsedProduct
-from price_verifier.fetcher.parser import parse_product_page
+from price_verifier.fetcher.parser import parse_offers_page, parse_product_page
 from price_verifier.pipeline.compare import prices_match
 from price_verifier.pipeline.rate_limiter import AdaptiveRateLimiter, LimiterClosed
 from price_verifier.storage import checkpoint
@@ -64,6 +64,7 @@ ACTION_BROWSER = "browser"
 
 PHASE_FAST = "fast"
 PHASE_RECOVERY = "recovery"
+PHASE_OFFERS = "offers"
 PHASE_BROWSER = "browser"
 PHASE_DONE = "done"
 PHASE_CANCELLED = "cancelled"
@@ -118,7 +119,9 @@ class RunStats:
     resolved_by: dict = field(default_factory=dict)     # "http"|"recovery"|"browser" -> rows
     fast: PassStats = field(default_factory=PassStats)
     recovery: PassStats = field(default_factory=PassStats)
+    offers: PassStats = field(default_factory=PassStats)
     browser: PassStats = field(default_factory=PassStats)
+    offers_check: dict = field(default_factory=dict)    # _OffersCheck.as_dict(): the run's self-validation
     browser_available: Optional[bool] = None            # None = browser pass never needed
     duration_s: float = 0.0
 
@@ -132,11 +135,11 @@ class RunStats:
 
     @property
     def blocks(self) -> int:
-        return self.fast.blocks + self.recovery.blocks + self.browser.blocks
+        return self.fast.blocks + self.recovery.blocks + self.offers.blocks + self.browser.blocks
 
     @property
     def rotations(self) -> int:
-        return self.fast.rotations + self.recovery.rotations + self.browser.rotations
+        return self.fast.rotations + self.recovery.rotations + self.offers.rotations + self.browser.rotations
 
     @property
     def final_rps(self) -> Optional[float]:
@@ -239,6 +242,9 @@ class PipelineTuning:
     browser_abort_block_streak: int = 3
     browser_start_timeout: float = 180.0
     browser_call_timeout: float = 120.0
+    offers_enabled: bool = True
+    offers_samples_required: int = 3
+    offers_max_samples: int = 6
 
     @classmethod
     def from_config(cls) -> "PipelineTuning":
@@ -271,6 +277,9 @@ class PipelineTuning:
             browser_abort_block_streak=config.BROWSER_ABORT_BLOCK_STREAK,
             browser_start_timeout=config.BROWSER_START_TIMEOUT_SECONDS,
             browser_call_timeout=config.BROWSER_CALL_TIMEOUT_SECONDS,
+            offers_enabled=config.OFFERS_FALLBACK_ENABLED,
+            offers_samples_required=config.OFFERS_SAMPLES_REQUIRED,
+            offers_max_samples=config.OFFERS_MAX_SAMPLES,
         )
 
 
@@ -412,7 +421,11 @@ class _SessionManager:
         self.generation = 1
         self._ready.set()
 
-    async def fetch(self, asin: str) -> tuple[FetchResult, int]:
+    @property
+    def supports_offers(self) -> bool:
+        return callable(getattr(self._session, "fetch_offers", None))
+
+    async def fetch(self, asin: str, kind: str = "product") -> tuple[FetchResult, int]:
         while True:
             await self._ready.wait()
             gen, session = self.generation, self._session
@@ -424,7 +437,12 @@ class _SessionManager:
         self._in_flight[gen] = self._in_flight.get(gen, 0) + 1
         try:
             try:
-                result = await session.fetch(asin)
+                if kind == "offers":
+                    fn = getattr(session, "fetch_offers", None)
+                    result = (await fn(asin) if callable(fn) else
+                              FetchResult(asin=asin, status_code=None, html=None, error="offers_unsupported"))
+                else:
+                    result = await session.fetch(asin)
             except Exception as e:  # contract says never raises; don't trust it blindly
                 result = FetchResult(asin=asin, status_code=None, html=None, error=f"fetch_error:{type(e).__name__}")
             return result, gen
@@ -510,6 +528,52 @@ class _PassCtx:
     aborted: bool = False
     abort_reason: str = ""
     error_streak: int = 0
+    fetch_kind: str = "product"    # "product" (/dp/ page) | "offers" (all-offers page)
+
+
+def _seller_key(name: Optional[str]) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+class _OffersCheck:
+    """Per-run self-validation of the offers-page fallback. During pass 1, a
+    few rows the product page settled with a price are ALSO read from the
+    offers page. The fallback is switched on for this run only if it agreed
+    on `required` of them and never disagreed — so if Amazon serves a layout
+    parse_offers_page() misreads, the fallback simply stays off (and the
+    sample pages are saved to debug_html to fix the parser)."""
+
+    def __init__(self, allowed: bool, required: int, max_samples: int):
+        self.allowed = allowed
+        self.required = max(1, required)
+        self.max_samples = max(self.required, max_samples)
+        self.agreed = self.disagreed = self.inconclusive = self.in_flight = 0
+
+    @property
+    def decided(self) -> bool:
+        return self.disagreed > 0 or self.agreed >= self.required
+
+    @property
+    def enabled(self) -> bool:
+        return self.allowed and self.disagreed == 0 and self.agreed >= self.required
+
+    def wants_sample(self) -> bool:
+        taken = self.agreed + self.disagreed + self.inconclusive + self.in_flight
+        return self.allowed and not self.decided and taken < self.max_samples
+
+    def compare(self, page: ParsedProduct, offers: ParsedProduct) -> Optional[bool]:
+        """True agree / False disagree / None inconclusive (offers page not
+        understood — says nothing about whether it would be right)."""
+        if offers.page_kind != "product" or offers.price is None or page.price is None:
+            return None
+        same_price = abs(offers.price - page.price) < 0.005
+        same_seller = (not page.seller or not offers.seller
+                       or _seller_key(page.seller) == _seller_key(offers.seller))
+        return same_price and same_seller
+
+    def as_dict(self) -> dict:
+        return {"allowed": self.allowed, "agreed": self.agreed, "disagreed": self.disagreed,
+                "inconclusive": self.inconclusive, "enabled": self.enabled}
 
 
 class _Pipeline:
@@ -534,6 +598,7 @@ class _Pipeline:
         self.browser_factory = browser_factory
         self.t = tuning or PipelineTuning.from_config()
         self.stats = RunStats(total_items=len(self.items))
+        self._offers = _OffersCheck(self.t.offers_enabled, self.t.offers_samples_required, self.t.offers_max_samples)
         self._finalized: set[str] = set()
         self._finalizers: set[asyncio.Task] = set()
         self._rng = random.Random()
@@ -671,15 +736,26 @@ class _Pipeline:
             try:
                 if ctx.aborted:
                     break
-                fetch, gen = await ctx.sessions.fetch(item.asin)
+                fetch, gen = await ctx.sessions.fetch(item.asin, ctx.fetch_kind)
             finally:
                 ctx.limiter.release()
             ctx.stats.attempts += 1
             attempted = True
             work.last_source = ctx.resolved_by
 
-            parsed = parse_product_page(fetch.html, item.asin) if fetch.html else None
-            status, reason, action = classify(fetch, parsed, item.expected_price, self.tol_abs, self.tol_pct)
+            if ctx.fetch_kind == "offers":
+                parsed = parse_offers_page(fetch.html, item.asin) if fetch.html else None
+                status, reason, action = classify(fetch, parsed, item.expected_price, self.tol_abs, self.tol_pct)
+                if action == ACTION_FINAL and status not in (checkpoint.STATUS_MATCHED, checkpoint.STATUS_MISMATCHED):
+                    # The offers page only ever CONFIRMS a price. Anything
+                    # else it says (404, no pinned offer...) is left for Chrome.
+                    status, reason, action = (checkpoint.STATUS_FAILED,
+                                              f"offers page: {reason or status}", ACTION_RETRY)
+                elif action != ACTION_FINAL and reason and not reason.startswith("offers page"):
+                    reason = f"offers page: {reason}"
+            else:
+                parsed = parse_product_page(fetch.html, item.asin) if fetch.html else None
+                status, reason, action = classify(fetch, parsed, item.expected_price, self.tol_abs, self.tol_pct)
 
             # Every pacing / blocking / abort decision is made synchronously,
             # BEFORE the first await: DB writes hop to a thread (slow on a
@@ -696,37 +772,22 @@ class _Pipeline:
                 work.last_reason = reason or "unknown"
                 if not ctx.aborted and is_block_signal(fetch, parsed):
                     blocked = True
-                    ctx.stats.block_reports += 1
-                    new_event = ctx.sessions.claim_block(gen)
-                    pause = ctx.limiter.on_block(ctx.limiter.epoch if new_event else -1)
-                    if new_event:
-                        ctx.stats.blocks += 1
-                        if ctx.limiter.block_streak >= ctx.abort_streak:
-                            self._abort_pass(ctx, f"{ctx.limiter.block_streak} blocks in a row", work.last_reason)
+                    new_event, pause = self._register_block(ctx, gen, work.last_reason)
                 if ctx.error_streak >= ctx.error_abort_streak:
                     self._abort_pass(ctx, f"{ctx.error_streak} failed requests in a row", work.last_reason)
 
             if blocked:
-                # Always follows claim_block(): it re-opens the session gate
-                # that claim_block closed, so no worker is left waiting on it.
-                rotated = await ctx.sessions.report_block(gen)
-                if rotated:
-                    ctx.stats.rotations += 1
-                if new_event:
-                    logger.warning("[%s] block event (%s) on %s: pause %.1fs, rate now %.2f rps, rotated=%s",
-                                   ctx.name, reason, item.asin, pause, ctx.limiter.current_rps, rotated)
-                    await self._debug(item.asin, fetch.html, f"block: {reason}", "http")
-                    await self._phase(ctx.name, {
-                        "event": "block", "reason": reason, "pause_seconds": round(pause, 2),
-                        "rps": round(ctx.limiter.current_rps, 3), "blocks": ctx.stats.blocks,
-                        "rotations": ctx.stats.rotations,
-                    })
+                await self._report_block(ctx, gen, new_event, pause, reason, item.asin, fetch.html)
 
             await self._db(checkpoint.record_attempt, self.run_id, item.asin)
 
             if action == ACTION_FINAL:
                 ctx.stats.resolved += 1
-                await self._finalize(work, status, reason, parsed, ctx.resolved_by, fetch.html, "http")
+                await self._finalize(work, status, reason, parsed, ctx.resolved_by, fetch.html,
+                                     "offers" if ctx.fetch_kind == "offers" else "http")
+                if (ctx.name == PHASE_FAST and parsed is not None and parsed.price is not None
+                        and self._offers.wants_sample() and ctx.sessions.supports_offers):
+                    await self._offers_sample(ctx, item.asin, parsed)
                 return
             if action == ACTION_BROWSER:
                 work.last_reason = reason or "ambiguous product page"
@@ -746,6 +807,78 @@ class _Pipeline:
             work.last_reason = ctx.abort_reason
         ctx.retry_out.append(work)
         ctx.stats.deferred += 1
+
+    def _register_block(self, ctx: _PassCtx, gen: int, last_reason: str) -> tuple[bool, float]:
+        """The synchronous half of reacting to a block (call before any
+        await): mark the identity blocked, cut the rate / start the pause,
+        count it, abort the pass after too many. Returns (new_event, pause)."""
+        ctx.stats.block_reports += 1
+        new_event = ctx.sessions.claim_block(gen)
+        pause = ctx.limiter.on_block(ctx.limiter.epoch if new_event else -1)
+        if new_event:
+            ctx.stats.blocks += 1
+            if ctx.limiter.block_streak >= ctx.abort_streak:
+                self._abort_pass(ctx, f"{ctx.limiter.block_streak} blocks in a row", last_reason)
+        return new_event, pause
+
+    async def _report_block(self, ctx: _PassCtx, gen: int, new_event: bool, pause: float,
+                            reason: Optional[str], asin: str, html: Optional[str]) -> None:
+        # Always follows _register_block(): report_block re-opens the session
+        # gate that claim_block closed, so no worker is left waiting on it.
+        rotated = await ctx.sessions.report_block(gen)
+        if rotated:
+            ctx.stats.rotations += 1
+        if new_event:
+            logger.warning("[%s] block event (%s) on %s: pause %.1fs, rate now %.2f rps, rotated=%s",
+                           ctx.name, reason, asin, pause, ctx.limiter.current_rps, rotated)
+            await self._debug(asin, html, f"block: {reason}", "http")
+            await self._phase(ctx.name, {
+                "event": "block", "reason": reason, "pause_seconds": round(pause, 2),
+                "rps": round(ctx.limiter.current_rps, 3), "blocks": ctx.stats.blocks,
+                "rotations": ctx.stats.rotations,
+            })
+
+    async def _offers_sample(self, ctx: _PassCtx, asin: str, page: ParsedProduct) -> None:
+        """Read a row the product page just settled from the offers page too,
+        and record whether they agree (see _OffersCheck). Paced and
+        block-handled exactly like any other request of this pass; never
+        affects the row's own result."""
+        oc = self._offers
+        oc.in_flight += 1
+        try:
+            try:
+                await ctx.limiter.acquire()
+            except LimiterClosed:
+                return
+            try:
+                if ctx.aborted:
+                    return
+                fetch, gen = await ctx.sessions.fetch(asin, "offers")
+            finally:
+                ctx.limiter.release()
+            offers = parse_offers_page(fetch.html, asin) if fetch.html else None
+            if not ctx.aborted and is_block_signal(fetch, offers):
+                new_event, pause = self._register_block(ctx, gen, "offers page blocked")
+                oc.inconclusive += 1
+                await self._report_block(ctx, gen, new_event, pause, "offers page blocked", asin, fetch.html)
+                return
+            verdict = oc.compare(page, offers) if offers is not None else None
+            if verdict is True:
+                oc.agreed += 1
+            elif verdict is False:
+                oc.disagreed += 1
+                logger.warning("offers page disagreed with the product page for %s (page %s / %s, offers %s / %s)"
+                               " — offers fallback stays off for this run", asin, page.price, page.seller,
+                               offers.price, offers.seller)
+            else:
+                oc.inconclusive += 1
+            label = {True: "agreed", False: "DISAGREED", None: "not understood"}[verdict]
+            await self._debug(asin, fetch.html, f"offers-sample {label}", "offers")
+            if oc.enabled and oc.agreed == oc.required:
+                logger.info("offers page agreed with the product page on %d rows — enabled as an extra check",
+                            oc.agreed)
+        finally:
+            oc.in_flight -= 1
 
     @staticmethod
     def _abort_pass(ctx: _PassCtx, why: str, last_reason: str) -> None:
@@ -804,6 +937,19 @@ class _Pipeline:
         return _PassCtx(PHASE_RECOVERY, checkpoint.RESOLVED_BY_RECOVERY, limiter,
                         _SessionManager(self.session_factory, persist=self._persist_sessions), t.max_attempts_recovery,
                         t.recovery_abort_block_streak, t.recovery_abort_error_streak, self.stats.recovery)
+
+    def _offers_ctx(self) -> _PassCtx:
+        t = self.t
+        limiter = AdaptiveRateLimiter(
+            t.recovery_rps, t.recovery_rps, t.recovery_rps, t.recovery_concurrency, 0.0, 1,
+            base_pause=t.block_pause_base, max_pause=t.block_pause_max,
+            escalation_window=t.block_escalation_window, decay_successes=t.block_decay_successes,
+            jitter=t.rate_jitter,
+        )
+        return _PassCtx(PHASE_OFFERS, checkpoint.RESOLVED_BY_OFFERS, limiter,
+                        _SessionManager(self.session_factory, persist=self._persist_sessions), 1,
+                        t.recovery_abort_block_streak, t.recovery_abort_error_streak, self.stats.offers,
+                        fetch_kind="offers")
 
     # ── Browser pass ─────────────────────────────────────────────────────────
     async def _browser_pass(self, works: list[_Work]) -> None:
@@ -1006,6 +1152,16 @@ class _Pipeline:
                 return
             to_browser.extend(rec.browser_out)
             to_browser.extend(rec.retry_out)
+
+        # Extra HTTP check — the offers page, only if it proved itself this run
+        self.stats.offers_check = self._offers.as_dict()
+        if to_browser and self._offers.enabled and not self._cancelled():
+            off = self._offers_ctx()
+            await self._phase(PHASE_OFFERS, {"event": "start", "items": len(to_browser),
+                                             "rps": self.t.recovery_rps}, persist=True)
+            if not await self._cancellable(self._run_http_pass(off, to_browser)):
+                return
+            to_browser = list(off.browser_out) + list(off.retry_out)
 
         # Pass 3 — real Chrome
         if to_browser and not self._cancelled():

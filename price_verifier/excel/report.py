@@ -230,10 +230,21 @@ def _write_run_info(ws: Worksheet, run: dict, items: list[dict]) -> None:
         ("Could not verify", run["failed"]),
         ("Tolerance", f"± ₹{run['tolerance_abs']:g}" + (f" or ± {run['tolerance_pct']:g}%" if run["tolerance_pct"] else "")),
     ]
-    labels = {"http": "Resolved on first pass", "recovery": "Resolved on recovery pass", "browser": "Resolved via Google Chrome check"}
-    for key in ("http", "recovery", "browser"):
+    labels = {"http": "Resolved on first pass", "recovery": "Resolved on recovery pass",
+              "offers": "Resolved via Amazon's offers page", "browser": "Resolved via Google Chrome check"}
+    for key in ("http", "recovery", "offers", "browser"):
         if by_resolver.get(key):
             rows.append((labels[key], by_resolver[key]))
+    oc = stats.get("offers_check") or {}
+    if oc.get("allowed"):
+        checked = oc.get("agreed", 0) + oc.get("disagreed", 0)
+        if oc.get("enabled"):
+            verdict = f"used — it agreed with the product page on {oc.get('agreed', 0)} of {checked} sample rows"
+        elif oc.get("disagreed"):
+            verdict = f"not used — it disagreed with the product page on {oc['disagreed']} of {checked} sample rows"
+        else:
+            verdict = "not used — not enough sample rows could be compared this run"
+        rows.append(("Offers-page double-check", verdict))
     for key, value in stats.items():
         if isinstance(value, (int, float, str)) and not isinstance(value, bool):
             rows.append((key.replace("_", " ").capitalize(), value))
