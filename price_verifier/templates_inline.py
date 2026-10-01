@@ -68,6 +68,8 @@ BASE_HTML = """<!DOCTYPE html>
   .phase { font-weight: 600; margin: 4px 0 12px; }
   progress { width: 100%; height: 18px; }
   .inline-form { display: inline; }
+  header nav .licensed { color: #cfe0f5; font-size: 12px; float: right; }
+  .mono { font-family: Consolas, Menlo, monospace; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -76,9 +78,17 @@ BASE_HTML = """<!DOCTYPE html>
   <nav>
     <a href="{{ url_for('index') }}">Upload</a>
     <a href="{{ url_for('history') }}">History</a>
+    {% if license_status and not license_status.disabled %}<a href="{{ url_for('activate') }}">License</a>{% endif %}
+    {% if license_status and license_status.customer %}<span class="licensed">Licensed to {{ license_status.customer }}</span>{% endif %}
   </nav>
 </header>
 <main>
+{% if license_status and license_status.status == 'offline' %}
+  <div class="notice">{{ license_status.message }}</div>
+{% endif %}
+{% for category, msg in get_flashed_messages(with_categories=true) %}
+  <div class="{{ 'ok-box' if category == 'ok' else ('notice' if category == 'notice' else 'error') }}">{{ msg }}</div>
+{% endfor %}
 {% block content %}{% endblock %}
 </main>
 <script>
@@ -187,6 +197,7 @@ highlight();
 CONFIRM_HTML = """{% extends "base.html" %}
 {% block content %}
 <h2>Ready to check — {{ filename }}</h2>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
 
 <p class="muted">Using: <strong>ASIN</strong> ← {{ mapping_desc.asin }} · <strong>Expected price</strong> ← {{ mapping_desc.expected_price }} ·
 <strong>Brand</strong> ← {{ mapping_desc.brand }}
@@ -405,6 +416,42 @@ HISTORY_HTML = """{% extends "base.html" %}
 {% endblock %}
 """
 
+ACTIVATE_HTML = """{% extends "base.html" %}
+{% block content %}
+{% if already_valid %}
+  <h2>License</h2>
+  <div class="ok-box">This computer is licensed{% if status.customer %} to <strong>{{ status.customer }}</strong>{% endif %}
+  {% if status.expires_at %} until {{ status.expires_at[:10] }}{% endif %}.</div>
+  <p class="muted">Key in use: <span class="mono">{{ current_key }}</span></p>
+  <p class="muted">To switch to a different key, enter it below.</p>
+{% else %}
+  <h2>Activate the Price Verification Tool</h2>
+  {% if status.status == 'expired' %}
+    <div class="error">Your license has expired{% if status.expires_at %} on {{ status.expires_at[:10] }}{% endif %}. Enter a renewed key, or contact support.</div>
+  {% elif status.status == 'revoked' %}
+    <div class="error">This license has been revoked. Enter a new key, or contact support.</div>
+  {% elif status.status == 'product_not_licensed' %}
+    <div class="error">This license key doesn't include the Price Verification Tool. Enter a key that does, or contact support to add it.</div>
+  {% elif status.message and status.reason != 'no_license' %}
+    <div class="error">{{ status.message }}</div>
+  {% endif %}
+  <p>Enter the license key you received. It is tied to this computer — keep it confidential.</p>
+{% endif %}
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ url_for('activate') }}">
+  <label for="key">License key</label>
+  <input type="text" id="key" name="key" placeholder="AMZ-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false"
+         style="text-transform: uppercase; font-family: Consolas, Menlo, monospace;" required>
+  <button type="submit">Activate</button>
+</form>
+
+<p class="muted" style="margin-top: 28px;">Needs an internet connection. Computer ID (for support):
+<span class="mono">{{ machine_id }}</span></p>
+{% endblock %}
+"""
+
 TEMPLATES = {
     "base.html": BASE_HTML,
     "upload.html": UPLOAD_HTML,
@@ -413,4 +460,5 @@ TEMPLATES = {
     "progress.html": PROGRESS_HTML,
     "results.html": RESULTS_HTML,
     "history.html": HISTORY_HTML,
+    "activate.html": ACTIVATE_HTML,
 }

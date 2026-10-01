@@ -6,12 +6,16 @@ Reads server URL + admin token from env vars or `~/.amazon_scraper_admin`
 (two lines: URL=...  TOKEN=...).
 
 Subcommands:
-  issue --customer NAME --days N [--machines N] [--notes TEXT]
+  issue --customer NAME --days N [--machines N] [--notes TEXT] [--products LIST]
+  set-products --key K --products LIST
   list
   extend --key K --days N
   revoke --key K
   release-machine --key K --machine-id M
   info --key K
+
+Products: amazon_scraper (default) | price_verifier — comma-separate for a
+key that unlocks both, e.g. --products amazon_scraper,price_verifier.
 
 Exit 0 on success, 1 on failure.
 """
@@ -136,6 +140,7 @@ def cmd_issue(args, url: str, token: str) -> None:
         "days": args.days,
         "max_machines": args.machines,
         "notes": args.notes or "",
+        "products": args.products,
     }
     data = post(url, "/admin/issue", token, body)
     print(f"Issued key for: {data['customer']}")
@@ -143,8 +148,14 @@ def cmd_issue(args, url: str, token: str) -> None:
     print(f"  Issued:       {data['issued_at']}")
     print(f"  Expires:      {data['expires_at']}")
     print(f"  Max machines: {data['max_machines']}")
+    print(f"  Products:     {', '.join(data.get('products') or ['amazon_scraper'])}")
     if data.get("notes"):
         print(f"  Notes:        {data['notes']}")
+
+
+def cmd_set_products(args, url: str, token: str) -> None:
+    data = post(url, "/admin/set-products", token, {"key": args.key, "products": args.products})
+    print(f"{data['key']} now unlocks: {', '.join(data['products'])}")
 
 
 def cmd_list(args, url: str, token: str) -> None:
@@ -158,6 +169,7 @@ def cmd_list(args, url: str, token: str) -> None:
         ("CUSTOMER", "customer"),
         ("EXPIRES", "expires_at"),
         ("MACHINES", "machines"),
+        ("PRODUCTS", "products"),
         ("STATUS", "status"),
         ("NOTES", "notes"),
     ]
@@ -194,6 +206,7 @@ def cmd_info(args, url: str, token: str) -> None:
     print(f"Expires:      {k['expires_at']}")
     print(f"Max machines: {k['max_machines']}")
     print(f"Revoked:      {'YES' if k['revoked'] else 'no'}")
+    print(f"Products:     {k.get('products') or 'amazon_scraper'}")
     if k.get("notes"):
         print(f"Notes:        {k['notes']}")
 
@@ -224,7 +237,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_issue.add_argument("--days", type=int, required=True)
     p_issue.add_argument("--machines", type=int, default=1)
     p_issue.add_argument("--notes", default="")
+    p_issue.add_argument("--products", default="amazon_scraper",
+                         help="comma-separated: amazon_scraper, price_verifier (default amazon_scraper)")
     p_issue.set_defaults(func=cmd_issue)
+
+    p_products = sub.add_parser("set-products", help="Set which products a key unlocks.")
+    p_products.add_argument("--key", required=True)
+    p_products.add_argument("--products", required=True,
+                            help="comma-separated, e.g. amazon_scraper,price_verifier")
+    p_products.set_defaults(func=cmd_set_products)
 
     p_list = sub.add_parser("list", help="List all keys.")
     p_list.set_defaults(func=cmd_list)

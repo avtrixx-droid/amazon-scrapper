@@ -15,12 +15,23 @@ Endpoints:
   POST /admin/revoke    — revoke a key (Bearer auth)
   POST /admin/release-machine — release an activation slot (Bearer auth)
   GET  /admin/info      — key + activations detail (Bearer auth)
+  POST /admin/set-products — set which products a key unlocks (Bearer auth)
+
+Products: one server serves several desktop apps. Each key carries the list
+of products it unlocks (keys.products, comma-separated); clients send their
+`product` with /activate, /heartbeat and /authorize-run. A request without
+`product` comes from a build that predates this and is treated as
+"amazon_scraper", and keys created before this column existed default to
+"amazon_scraper" — so existing scraper installs and keys keep working
+unchanged. A key used on several products on one machine still takes one
+machine slot (activations are per key + machine).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import sys
 from datetime import datetime, timedelta, timezone
@@ -56,6 +67,11 @@ if not DATABASE_URL:
 
 # itsdangerous serializer (TimedSerializer so tokens carry an issued-at timestamp)
 serializer = URLSafeTimedSerializer(SIGNING_SECRET, salt="amzscraper-license-v1")
+
+# Products this server can license. A request without "product" (older
+# builds) is the original Amazon Scraper.
+DEFAULT_PRODUCT = "amazon_scraper"
+_PRODUCT_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 
 # Key alphabet — Crockford-ish, no ambiguous characters (no 0,1,I,L,O)
 KEY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -151,7 +167,39 @@ def init_db():
                 """
             )
         conn.commit()
-        log.info("DB initialised (Postgres)")
+    finally:
+        conn.close()
+    # Additive migrations — safe on every start and on a live DB that
+    # predates them: existing keys / runs become amazon_scraper ones.
+    for table, column, ddl in _MIGRATIONS:
+        if not _column_exists(table, column):
+            conn = psycopg2.connect(DATABASE_URL)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                conn.commit()
+                log.info("DB migrated: added %s.%s", table, column)
+            finally:
+                conn.close()
+    log.info("DB initialised (Postgres)")
+
+
+_MIGRATIONS = (
+    ("keys", "products", f"TEXT NOT NULL DEFAULT '{DEFAULT_PRODUCT}'"),
+    ("runs", "product", f"TEXT NOT NULL DEFAULT '{DEFAULT_PRODUCT}'"),
+)
+
+
+def _column_exists(table: str, column: str) -> bool:
+    """Probe on a throwaway connection (a failed statement aborts a Postgres
+    transaction). Portable: no information_schema / IF NOT EXISTS needed."""
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {column} FROM {table} LIMIT 1")
+        return True
+    except Exception:
+        return False
     finally:
         conn.close()
 
@@ -200,6 +248,36 @@ def require_admin(fn):
     return wrapper
 
 
+def request_product(data: dict) -> str | None:
+    """The product a client request is for; None if malformed."""
+    product = (data.get("product") or DEFAULT_PRODUCT)
+    product = product.strip().lower() if isinstance(product, str) else ""
+    return product if _PRODUCT_RE.match(product) else None
+
+
+def parse_products(value) -> list[str] | None:
+    """Admin input ("a,b" or ["a", "b"]) -> de-duplicated list, or None if
+    empty / malformed."""
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[str] = []
+    for item in value:
+        p = str(item).strip().lower()
+        if not p:
+            continue
+        if not _PRODUCT_RE.match(p):
+            return None
+        if p not in out:
+            out.append(p)
+    return out or None
+
+
+def key_products(row) -> list[str]:
+    return parse_products(row.get("products") or DEFAULT_PRODUCT) or [DEFAULT_PRODUCT]
+
+
 def json_body() -> dict:
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -219,8 +297,9 @@ def activate():
     key = (data.get("key") or "").strip().upper()
     machine_id = (data.get("machine_id") or "").strip()
     app_version = (data.get("app_version") or "").strip()
+    product = request_product(data)
 
-    if not key or not machine_id:
+    if not key or not machine_id or product is None:
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
@@ -232,6 +311,10 @@ def activate():
     if row["revoked"]:
         log.info("activate: revoked key=%s", key)
         return jsonify({"ok": False, "reason": "revoked"}), 403
+
+    if product not in key_products(row):
+        log.info("activate: product_not_licensed key=%s product=%s", key, product)
+        return jsonify({"ok": False, "reason": "product_not_licensed", "product": product}), 403
 
     expires_at = row["expires_at"]
     if parse_iso(expires_at) < datetime.now(timezone.utc):
@@ -276,8 +359,8 @@ def activate():
             (key, machine_id, now, now, app_version),
         )
         db.commit()
-        log.info("activate: new machine key=%s machine=%s ver=%s",
-                 key, machine_id[:12], app_version)
+        log.info("activate: new machine key=%s machine=%s product=%s ver=%s",
+                 key, machine_id[:12], product, app_version)
 
     token = sign_token({
         "key": key,
@@ -289,6 +372,7 @@ def activate():
         "ok": True,
         "expires_at": expires_at,
         "customer": row["customer"],
+        "products": key_products(row),
         "signed_token": token,
         "server_time": now,
     })
@@ -300,8 +384,9 @@ def heartbeat():
     key = (data.get("key") or "").strip().upper()
     machine_id = (data.get("machine_id") or "").strip()
     app_version = (data.get("app_version") or "").strip()
+    product = request_product(data)
 
-    if not key or not machine_id:
+    if not key or not machine_id or product is None:
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
@@ -311,6 +396,10 @@ def heartbeat():
         # (or be blocked if revocation was intentional).
         log.info("heartbeat: revoked-or-missing key=%s", key)
         return jsonify({"ok": False, "reason": "revoked"}), 403
+
+    if product not in key_products(row):
+        log.info("heartbeat: product_not_licensed key=%s product=%s", key, product)
+        return jsonify({"ok": False, "reason": "product_not_licensed", "product": product}), 403
 
     activation = db.execute(
         "SELECT * FROM activations WHERE key = %s AND machine_id = %s",
@@ -362,8 +451,9 @@ def authorize_run():
     asin_count = int(data.get("asin_count") or 0)
     pincode_count = int(data.get("pincode_count") or 0)
     app_version = (data.get("app_version") or "").strip()
+    product = request_product(data)
 
-    if not key or not machine_id:
+    if not key or not machine_id or product is None:
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
@@ -372,6 +462,10 @@ def authorize_run():
     if row is None or row["revoked"]:
         log.info("authorize-run: revoked-or-missing key=%s", key)
         return jsonify({"ok": False, "reason": "revoked"}), 403
+
+    if product not in key_products(row):
+        log.info("authorize-run: product_not_licensed key=%s product=%s", key, product)
+        return jsonify({"ok": False, "reason": "product_not_licensed", "product": product}), 403
 
     expires_at_key = row["expires_at"]
     if parse_iso(expires_at_key) < datetime.now(timezone.utc):
@@ -413,14 +507,14 @@ def authorize_run():
 
     db.execute(
         "INSERT INTO runs (key, machine_id, asin_count, pincode_count, "
-        "app_version, run_token, requested_at, expires_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "app_version, run_token, requested_at, expires_at, product) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (key, machine_id, asin_count, pincode_count,
-         app_version, run_token, requested_at, run_expires),
+         app_version, run_token, requested_at, run_expires, product),
     )
     db.commit()
-    log.info("authorize-run: ok key=%s machine=%s asins=%d pincodes=%d",
-             key, machine_id[:12], asin_count, pincode_count)
+    log.info("authorize-run: ok key=%s machine=%s product=%s asins=%d pincodes=%d",
+             key, machine_id[:12], product, asin_count, pincode_count)
 
     return jsonify({
         "ok": True,
@@ -439,8 +533,9 @@ def admin_issue():
     days = int(data.get("days") or 0)
     max_machines = int(data.get("max_machines") or 1)
     notes = (data.get("notes") or "").strip()
+    products = parse_products(data.get("products") or DEFAULT_PRODUCT)
 
-    if not customer or days <= 0 or max_machines <= 0:
+    if not customer or days <= 0 or max_machines <= 0 or products is None:
         return jsonify({"ok": False, "reason": "bad_request"}), 400
 
     db = get_db()
@@ -459,13 +554,13 @@ def admin_issue():
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     db.execute(
-        "INSERT INTO keys (key, customer, issued_at, expires_at, max_machines, revoked, notes) "
-        "VALUES (%s, %s, %s, %s, %s, 0, %s)",
-        (key, customer, issued_at, expires_at, max_machines, notes),
+        "INSERT INTO keys (key, customer, issued_at, expires_at, max_machines, revoked, notes, products) "
+        "VALUES (%s, %s, %s, %s, %s, 0, %s, %s)",
+        (key, customer, issued_at, expires_at, max_machines, notes, ",".join(products)),
     )
     db.commit()
-    log.info("admin: issued key=%s customer=%s days=%d max=%d",
-             key, customer, days, max_machines)
+    log.info("admin: issued key=%s customer=%s days=%d max=%d products=%s",
+             key, customer, days, max_machines, ",".join(products))
 
     return jsonify({
         "ok": True,
@@ -475,6 +570,7 @@ def admin_issue():
         "expires_at": expires_at,
         "max_machines": max_machines,
         "notes": notes,
+        "products": products,
     })
 
 
@@ -484,7 +580,7 @@ def admin_list():
     db = get_db()
     rows = db.execute(
         "SELECT k.key, k.customer, k.issued_at, k.expires_at, k.max_machines, "
-        "k.revoked, k.notes, "
+        "k.revoked, k.notes, k.products, "
         "(SELECT COUNT(*) FROM activations a WHERE a.key = k.key) AS machines_used "
         "FROM keys k ORDER BY k.issued_at DESC"
     ).fetchall()
@@ -553,6 +649,28 @@ def admin_unrevoke():
     db.commit()
     log.info("admin: unrevoked key=%s", key)
     return jsonify({"ok": True, "key": key, "revoked": False})
+
+
+@app.route("/admin/set-products", methods=["POST"])
+@require_admin
+def admin_set_products():
+    """Replace the list of products a key unlocks (e.g. add the Price
+    Verification Tool to an existing scraper customer's key)."""
+    data = json_body()
+    key = (data.get("key") or "").strip().upper()
+    products = parse_products(data.get("products"))
+    if not key or products is None:
+        return jsonify({"ok": False, "reason": "bad_request"}), 400
+
+    db = get_db()
+    row = db.execute("SELECT 1 FROM keys WHERE key = %s", (key,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "reason": "key_not_found"}), 404
+
+    db.execute("UPDATE keys SET products = %s WHERE key = %s", (",".join(products), key))
+    db.commit()
+    log.info("admin: set products key=%s products=%s", key, ",".join(products))
+    return jsonify({"ok": True, "key": key, "products": products})
 
 
 @app.route("/admin/release-machine", methods=["POST"])

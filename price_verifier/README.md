@@ -173,7 +173,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 372 tests) runs offline:
+The whole suite (`tests/`, 389 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -244,6 +244,45 @@ Windows-like disk latency.
   by tests using a fake driver, and it only handles rows the HTTP passes
   could not settle.
 
+## License key
+
+The tool is unlocked with a license key from the **same license server and
+database as the Amazon Scraper** (`license_server/`). It uses the same keys,
+the same admin CLI and the same machine binding. The client is
+`licensing.py`. Each key carries a list of products, and this tool asks for
+`price_verifier`, so you decide per customer who can use which tool:
+
+```bash
+python license_server/issue_key.py issue --customer "Lapcare" --days 365 --products price_verifier
+python license_server/issue_key.py set-products --key AMZ-... --products amazon_scraper,price_verifier
+python license_server/issue_key.py revoke --key AMZ-...      # blocks the next run, every product
+```
+
+- **First launch:** without a key, every page leads to **Activate**, where
+  the user enters the key once. The key is bound to the PC, using the same
+  machine-ID formula as the scraper. A key covering both tools on one PC uses
+  one machine slot.
+- **Every run is authorized by the server** before anything starts: new
+  runs, Resume and Retry alike. The server checks the key, expiry, product and
+  machine, and logs the run with its ASIN count.
+- **If the server rejects a run** (revoked, expired, product not on the key,
+  too many machines), the app goes back to the activation page with the
+  reason.
+- **With no internet,** a run is allowed within 24 hours of the last
+  successful authorization; otherwise the confirm page says to reconnect,
+  and the upload is kept so nothing has to be redone.
+- **Weekly check:** the license is re-checked every 7 days, and a failed
+  check because of no internet only shows a banner.
+- **Already-running jobs** are never interrupted: progress and Pause stay
+  available.
+- **License file:** stored at `%APPDATA%\PriceVerificationTool\license.json`.
+- **Server URL:** CI writes it into the `.exe` from the `LICENSE_SERVER_URL`
+  secret, with a built-in fallback. The `.exe` ignores any environment
+  override, so a user can't point it at a fake server.
+- **Running from source:** `PV_LICENSE_SERVER_URL` and
+  `PV_LICENSE_DISABLED=1` (useful for the simulator) only work when running
+  from source.
+
 ## Tunables
 
 All tunables are in `config.py`:
@@ -294,7 +333,10 @@ Cell text is sanitized against Excel formula injection.
 - It collects curl_cffi (including its bundled libcurl-impersonate),
   selectolax's compiled parser, certifi, undetected-chromedriver and
   selenium.
-- There is no Cython step and no license gate.
+- There is no Cython step. The license gate is described under "License key" below.
+- CI bakes the license server URL in as `price_verifier/_build_config.py`,
+  generated from the `LICENSE_SERVER_URL` repository secret (the same one the
+  scraper build uses; it is never committed).
 - Templates ship as Python source (`templates_inline.py`), so there is no
   template folder that a frozen build could fail to find.
 - When frozen, the data directory is created next to the `.exe`.
@@ -312,6 +354,7 @@ equivalent.
 price_verifier/
 ├── app.py                    Flask UI: upload → column mapping → confirm → progress (pause) → results (retry) → history
 ├── config.py                 Run defaults, pipeline tunables, frozen-aware data dir (+ PV_DATA_DIR)
+├── licensing.py              License client (shared license server, product "price_verifier"): activation, per-run authorization
 ├── templates_inline.py       Jinja templates as Python source (DictLoader)
 ├── ingest/
 │   ├── column_detect.py      load_table / detect_columns / parse_rows — content + header based column detection

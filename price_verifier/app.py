@@ -7,7 +7,10 @@ background thread, since Flask's dev/WSGI server is synchronous. Progress
 reaches the browser via Server-Sent Events.
 
 Single-user by design — module-level dicts are enough; no per-session
-isolation, no auth, no job queue. SQLite is the durable record; everything
+isolation, no job queue. Use is gated by a license key (licensing.py, the
+same license server as the Amazon Scraper): pages need an activated key, and
+every run (new / resume / retry) is authorized by the server BEFORE the
+pipeline thread starts. SQLite is the durable record; everything
 in memory here is disposable UI state.
 """
 
@@ -16,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -25,11 +29,11 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, Response, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, flash, jsonify, redirect, render_template, request, send_file, url_for
 from jinja2 import DictLoader
 from openpyxl.utils import get_column_letter
 
-from price_verifier import config
+from price_verifier import config, licensing
 from price_verifier.excel.report import build_brand_report, build_report
 from price_verifier.ingest.column_detect import detect_columns, load_table, parse_rows
 from price_verifier.ingest.input_parser import InputValidationError
@@ -47,6 +51,8 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 # Templates ship as Python source (templates_inline.py), not a templates/
 # folder, so there's no PyInstaller data-file path to get wrong when frozen.
 app.jinja_loader = DictLoader(TEMPLATES)
+# Only signs the flash-message cookie of this local, single-user app.
+app.secret_key = os.urandom(32)
 
 log = logging.getLogger("price_verifier.app")
 
@@ -129,7 +135,7 @@ def _describe_mapping(entry: dict) -> dict:
     return {k: name(k) for k in ("asin", "expected_price", "brand")}
 
 
-def _confirm_view(entry: dict):
+def _confirm_view(entry: dict, error: str | None = None):
     report = entry["report"]
     brands = {(r.brand or "").strip() for r in report.valid}
     brand_from_amazon = entry["mapping"].get("brand") is None
@@ -142,6 +148,7 @@ def _confirm_view(entry: dict):
         default_concurrency=config.DEFAULT_CONCURRENCY, max_concurrency=config.MAX_CONCURRENCY,
         default_tolerance_abs=config.DEFAULT_TOLERANCE_ABS,
         default_tolerance_pct=config.DEFAULT_TOLERANCE_PCT,
+        error=error,
     )
 
 
@@ -304,6 +311,59 @@ def _is_active(run_id: str) -> bool:
         return bool(st and st["status"] == "running")
 
 
+# ── License gate ───────────────────────────────────────────────────────────
+_LICENSE_CACHE: dict = {"status": None, "at": 0.0}
+_LICENSE_CACHE_S = 60.0
+# Reachable without a valid license: the activation page itself, and what a
+# run already in progress needs (watch it, pause it) — the gate is at START.
+_LICENSE_OPEN_ENDPOINTS = {"activate", "license_status_json", "healthz", "static",
+                           "progress_view", "stream", "cancel"}
+
+
+def _license_status(force: bool = False) -> dict:
+    if not licensing.enforced():
+        return {"status": "valid", "disabled": True}
+    now = time.time()
+    if force or _LICENSE_CACHE["status"] is None or now - _LICENSE_CACHE["at"] > _LICENSE_CACHE_S:
+        _LICENSE_CACHE["status"] = licensing.client().status()
+        _LICENSE_CACHE["at"] = now
+    return _LICENSE_CACHE["status"]
+
+
+@app.before_request
+def _license_gate():
+    if request.endpoint is None or request.endpoint in _LICENSE_OPEN_ENDPOINTS:
+        return None
+    if _license_status()["status"] in licensing.BLOCKING_STATUSES:
+        return redirect(url_for("activate"))
+    return None
+
+
+@app.context_processor
+def _inject_license():
+    return {"license_status": _license_status()}
+
+
+def _authorize_run(item_count: int):
+    """Server authorization for a run — call BEFORE _start_run. Returns None
+    if the run may start, a redirect to the activation page for a license
+    problem, or a plain error message for a transient one (no internet and
+    no successful check in the last 24 h)."""
+    if not licensing.enforced():
+        return None
+    result = licensing.client().authorize_run(item_count)
+    if result.ok:
+        if result.offline:
+            flash("The license server couldn't be reached — this run uses the 24-hour offline allowance.",
+                  "notice")
+        return None
+    _license_status(force=True)
+    if result.relicense:
+        flash(result.message, "error")
+        return redirect(url_for("activate"))
+    return result.message
+
+
 def _restart_existing_run(run_id: str):
     """Shared by Resume and Retry: re-queue this run's pending + failed rows."""
     run = checkpoint.get_run(run_id)
@@ -320,6 +380,12 @@ def _restart_existing_run(run_id: str):
         tolerance_pct=run["tolerance_pct"], concurrency=run["concurrency"],
         use_browser=bool(run.get("use_browser", 1)),
     )
+    denied = _authorize_run(len(items))
+    if denied is not None:
+        if isinstance(denied, str):
+            flash(denied, "error")
+            return redirect(url_for("history"))
+        return denied
     _start_run(items, run_cfg, use_browser=run_cfg.use_browser, run_id=run_id)
     return redirect(url_for("progress_view", run_id=run_id))
 
@@ -416,7 +482,8 @@ def map_columns(upload_id: str):
 
 @app.route("/start", methods=["POST"])
 def start():
-    entry = _PENDING_UPLOADS.pop(request.form.get("upload_id", ""), None)
+    upload_id = request.form.get("upload_id", "")
+    entry = _PENDING_UPLOADS.get(upload_id)
     if entry is None or entry.get("report") is None:
         return redirect(url_for("index"))
 
@@ -431,6 +498,12 @@ def start():
         for r in entry["report"].valid
     ]
     run_cfg.use_browser = request.form.get("use_browser") == "1"
+    # License check before anything starts; the upload is kept so a
+    # transient failure (no internet) can simply be retried from this page.
+    denied = _authorize_run(len(items))
+    if denied is not None:
+        return _confirm_view(entry, error=denied) if isinstance(denied, str) else denied
+    _PENDING_UPLOADS.pop(upload_id, None)
     run_id = _start_run(items, run_cfg, use_browser=run_cfg.use_browser)
     return redirect(url_for("progress_view", run_id=run_id))
 
@@ -562,6 +635,34 @@ def download_brand(run_id: str, brand: str):
         return redirect(url_for("index"))
     path = build_brand_report(run_id, brand)
     return send_file(str(path), as_attachment=True, download_name=path.name)
+
+
+@app.route("/activate", methods=["GET", "POST"])
+def activate():
+    if not licensing.enforced():
+        return redirect(url_for("index"))
+    lic = licensing.client()
+    error = None
+    if request.method == "POST":
+        result = lic.activate(request.form.get("key", ""))
+        if result.ok:
+            status = _license_status(force=True)
+            who = status.get("customer")
+            flash(f"License activated{' for ' + who if who else ''}. Welcome!", "ok")
+            return redirect(url_for("index"))
+        error = result.message
+    status = _license_status(force=True)
+    current = lic.load() or {}
+    return render_template(
+        "activate.html", error=error, status=status,
+        current_key=current.get("key", ""), machine_id=licensing.get_machine_id(),
+        already_valid=status["status"] not in licensing.BLOCKING_STATUSES,
+    )
+
+
+@app.route("/license-status")
+def license_status_json():
+    return jsonify(_license_status(force=request.args.get("refresh") == "1"))
 
 
 @app.route("/history")

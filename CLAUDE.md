@@ -47,10 +47,12 @@ AmazonScraper/
 ├── setup_cython.py               ← Cython build: compiles license.py + scraper.py to native .so/.pyd
 ├── tests/                        ← unittest suite (Selenium-free parser tests)
 │   ├── test_delivery_parser.py   ← 94 tests for the delivery priority resolver
-│   └── test_license.py           ← license authorization + grace period tests
+│   ├── test_license.py           ← license authorization + grace period tests
+│   └── test_server.py            ← license server API tests (SQLite stand-in for psycopg2; incl. per-product keys)
 ├── license_server/               ← Render-hosted Flask + PostgreSQL license service
 │   ├── app.py                    ← server: /activate, /heartbeat, /authorize-run, /admin/*, /healthz
-│   ├── issue_key.py              ← admin CLI: issue/list/extend/revoke/release-machine
+│   ├── issue_key.py              ← admin CLI: issue/list/extend/revoke/release-machine/set-products
+│   ├── test_app.py               ← server tests against REAL Postgres (skipped unless LICENSE_TEST_DATABASE_URL)
 │   ├── requirements.txt          ← server-side deps (flask, itsdangerous, gunicorn, requests)
 │   ├── render.yaml               ← one-click Render Blueprint (web service only; DB is Supabase)
 │   └── README.md                 ← deploy + usage guide
@@ -94,8 +96,10 @@ fake-Amazon (`price_verifier/tests/sim_amazon.py`) — see that README's
 as trustworthy.
 
 Windows only, for now (no macOS spec). `price_verifier_windows.spec` builds
-a single-file `.exe` via PyInstaller — no Cython step, no license gate (this
-tool has neither). The build bundles curl_cffi (with its
+a single-file `.exe` via PyInstaller — no Cython step. It IS license-gated,
+through the same license server/DB as the scraper: `price_verifier/licensing.py`
+sends `product: "price_verifier"`, and a key only unlocks the products on its
+list (see "License System → Products" below). The build bundles curl_cffi (with its
 libcurl-impersonate) plus selenium/undetected-chromedriver for the Chrome
 fallback pass; Chrome itself must be installed on the vendor's machine
 for that pass, and the tool degrades to "Could Not Verify + Retry" without
@@ -787,6 +791,22 @@ server loses an activation row. `max_machines` is still enforced, so a new
 new machine) but is NOT a permanent per-machine block — a valid key under its
 limit can reclaim a free slot by running again. The hard "stop misuse now"
 control is **`revoke`** (kills the whole key); `unrevoke` re-enables it.
+
+### Products (one server, several apps)
+
+The server licenses more than one app. `keys.products` lists what a key
+unlocks (`amazon_scraper`, `price_verifier`). Clients send `product`; a
+request without it (every existing scraper build) is `amazon_scraper`, and
+keys from before the column existed default to `amazon_scraper`, so the
+scraper's behaviour is unchanged. A key used on both apps on one PC takes
+one machine slot. Admin: `issue ... --products price_verifier`,
+`set-products --key K --products amazon_scraper,price_verifier`. The migration
+is additive and runs in `init_db()` on every start — a redeploy is all a live
+server needs. The price verifier's client is `price_verifier/licensing.py`
+(a product-agnostic `LicenseClient`; same machine-id algorithm as
+`license.py`). **Never** make the server accept a request for a product the
+key doesn't list, and never let the price verifier start a run before
+`authorize_run()` succeeds (same rule as `/start` and `/retry` in `gui.py`).
 
 ### Where keys live
 

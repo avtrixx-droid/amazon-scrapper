@@ -292,5 +292,47 @@ class ServerLifecycleTests(unittest.TestCase):
         self.assertTrue(r.get_json()["ok"])
 
 
+class ProductScopeTests(unittest.TestCase):
+    """Per-product keys (Price Verification Tool on the same server) without
+    breaking existing Amazon Scraper installs, which never send a product."""
+
+    def setUp(self):
+        _fresh_db()
+        self.c = srv.app.test_client()
+
+    def _issue(self, products=None):
+        body = {"customer": "TestCo", "days": 30, "max_machines": 1}
+        if products is not None:
+            body["products"] = products
+        r = self.c.post("/admin/issue", json=body, headers=ADMIN)
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        return r.get_json()["key"]
+
+    def _post(self, path, body):
+        r = self.c.post(path, json=body)
+        return r.status_code, r.get_json()
+
+    def test_scraper_clients_unchanged(self):
+        key = self._issue()
+        self.assertEqual(self._post("/activate", {"key": key, "machine_id": MACHINE})[0], 200)
+        self.assertEqual(self._post("/authorize-run", {"key": key, "machine_id": MACHINE})[0], 200)
+
+    def test_default_key_does_not_unlock_price_verifier(self):
+        key = self._issue()
+        code, data = self._post("/authorize-run", {"key": key, "machine_id": MACHINE, "product": "price_verifier"})
+        self.assertEqual((code, data["reason"]), (403, "product_not_licensed"))
+
+    def test_set_products_grants_both_on_one_machine_slot(self):
+        key = self._issue()
+        r = self.c.post("/admin/set-products", json={"key": key, "products": "amazon_scraper,price_verifier"},
+                        headers=ADMIN)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self._post("/activate", {"key": key, "machine_id": MACHINE})[0], 200)
+        self.assertEqual(self._post("/activate", {"key": key, "machine_id": MACHINE,
+                                                  "product": "price_verifier"})[0], 200)
+        code, data = self._post("/activate", {"key": key, "machine_id": "other-pc", "product": "price_verifier"})
+        self.assertEqual((code, data["reason"]), (403, "max_machines_reached"))
+
+
 if __name__ == "__main__":
     unittest.main()

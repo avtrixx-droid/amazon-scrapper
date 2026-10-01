@@ -91,20 +91,53 @@ python issue_key.py release-machine \
 
 # Detailed view of a key + every machine it's on
 python issue_key.py info --key AMZ-XXXX-XXXX-XXXX-XXXX
+
+# Price Verification Tool: a key for it only, or add it to an existing key
+python issue_key.py issue --customer "Lapcare" --days 365 --products price_verifier
+python issue_key.py set-products --key AMZ-XXXX-XXXX-XXXX-XXXX --products amazon_scraper,price_verifier
 ```
+
+## Products (one server, several apps)
+
+The same server and database license both desktop apps. Each key has a
+product list (`keys.products`):
+
+| Product | App | Sends `product` |
+|---|---|---|
+| `amazon_scraper` | the delivery scraper (`gui.py` / `license.py`) | no — requests without it are treated as `amazon_scraper` |
+| `price_verifier` | the Price Verification Tool (`price_verifier/licensing.py`) | yes |
+
+- A key only unlocks the products on its list; anything else gets
+  `product_not_licensed`.
+- `issue` defaults to `amazon_scraper`, so existing keys and existing scraper
+  builds behave exactly as before.
+- One key covering both products on one PC uses **one** machine slot
+  (activations are per key + machine).
+- `revoke` still blocks every product on the key.
+- `/admin/runs` records which product each run was for.
+
+**Upgrading a live server:** just redeploy. On start-up, `init_db()` adds
+`keys.products` and `runs.product` if they're missing; both default to
+`amazon_scraper`. It only adds columns, never touches existing data, and is
+safe to run on every start. Tests: `python -m unittest tests.test_server`
+(SQLite stand-in, runs anywhere) and `license_server/test_app.py` (real
+Postgres, including migrating an old-schema database; set
+`LICENSE_TEST_DATABASE_URL` to a throwaway database).
 
 ## How the client behaves
 
-- On launch, the client loads `license.json` (in the user's app-data dir),
-  verifies the embedded signed token locally, and proceeds offline.
-- Every 7 days the client sends a `POST /heartbeat`. If the server says
-  `revoked` or `expired`, the client locks the UI and shows the appropriate
-  page.
-- If the server is unreachable, the client keeps working for up to **14 days**
-  after the last successful check. After that the user has to reconnect.
-- Result: the free Render dyno going to sleep is invisible to customers — it
-  wakes up on the next heartbeat, and even prolonged outages (up to two weeks)
-  don't disrupt usage.
+- On launch, the client loads `license.json` (in the user's app-data dir) to
+  decide whether to show the activation page.
+- **Every run is authorized by the server** (`POST /authorize-run`) before
+  it starts. The server checks the key, expiry, product and machine, and
+  logs the run.
+- If the server can't be reached, a run is still allowed within **24 hours**
+  of the last successful authorization. After that the user must reconnect.
+- Every 7 days the client also sends `POST /heartbeat`. If the server says
+  `revoked`, `expired` or `product_not_licensed`, the client shows the
+  activation page.
+- The 35-second request timeout covers the free Render service waking up
+  from sleep.
 
 ## Endpoints
 
@@ -113,6 +146,10 @@ python issue_key.py info --key AMZ-XXXX-XXXX-XXXX-XXXX
 | GET | `/healthz` | — | Render health check |
 | POST | `/activate` | — | First-time key activation, binds to machine_id |
 | POST | `/heartbeat` | — | Periodic re-validation |
+| POST | `/authorize-run` | — | Per-run gate (key, expiry, product, machine); logs the run |
+| POST | `/admin/set-products` | Bearer | Set the products a key unlocks |
+| POST | `/admin/unrevoke` | Bearer | Re-enable a revoked key |
+| GET | `/admin/runs?key=K` | Bearer | Recent run authorizations (with product) |
 | POST | `/admin/issue` | Bearer | Issue a new key |
 | GET | `/admin/list` | Bearer | List all keys |
 | POST | `/admin/extend` | Bearer | Bump expiry |
