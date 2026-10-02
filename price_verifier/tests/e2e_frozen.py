@@ -127,7 +127,12 @@ class Journey:
 
     # ── journey ────────────────────────────────────────────────────────────
     def launch(self, sim_url):
-        env = dict(os.environ, PV_MARKETPLACE_BASE_URL=sim_url, PV_NO_BROWSER="1", NO_PROXY="*", no_proxy="*")
+        env = dict(os.environ, PV_NO_BROWSER="1", NO_PROXY="127.0.0.1,localhost",
+                   no_proxy="127.0.0.1,localhost")
+        if sim_url:
+            env["PV_MARKETPLACE_BASE_URL"] = sim_url
+        else:
+            env.pop("PV_MARKETPLACE_BASE_URL", None)
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -199,7 +204,7 @@ class Journey:
         self.say(f"run finished in {time.time() - t0:.0f} s: {json.dumps(last)[:200]}")
         self.check(last["status"] == "completed", "run completed")
         self.check(last["done"] == n_rows, f"all {n_rows} rows have a result")
-        if self.args.expect_chrome:
+        if self.args.expect_chrome and not self.args.live:
             self.check(last["failed"] == 0, "no row left as Could Not Verify")
         return run_id, last
 
@@ -214,7 +219,7 @@ class Journey:
         chrome_rows = int(info.get("Resolved via Google Chrome check") or 0)
         self.say(f"    Run Info: first pass={info.get('Resolved on first pass')}, Chrome={chrome_rows}, "
                  f"could not verify={info.get('Could not verify')}")
-        if self.args.expect_chrome:
+        if self.args.expect_chrome and not self.args.live:
             self.check(chrome_rows >= self.args.browser_only,
                        f"the Chrome check priced the {self.args.browser_only} browser-only rows")
         self.check(self.http.get("/history").status_code == 200, "history page")
@@ -231,6 +236,11 @@ class Journey:
             try:
                 r = self.http.get(f"/download/{self.run_id}")
                 wb = load_workbook(io.BytesIO(r.content), read_only=True)
+                if "Run Info" in wb.sheetnames:
+                    print("-- Run Info sheet --")
+                    for row in wb["Run Info"].iter_rows(values_only=True):
+                        if any(v is not None for v in row):
+                            print("   ", " | ".join("" if v is None else str(v) for v in row))
                 if "Could Not Verify" in wb.sheetnames:
                     print("-- Could Not Verify sheet --")
                     for row in wb["Could Not Verify"].iter_rows(values_only=True):
@@ -243,7 +253,7 @@ class Journey:
             if not f.exists() or not f.stat().st_size:
                 continue
             lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-            if name == "app.log":
+            if name == "app.log" and not self.args.live:
                 keep, in_tb = [], False
                 for ln in lines:
                     if re.search(r"\b(WARNING|ERROR|CRITICAL)\b", ln):
@@ -274,6 +284,40 @@ class Journey:
             self.proc.kill()
 
 
+_FALLBACK_LIVE_ASINS = (
+    # Used only if the search page can't be read (e.g. the runner is blocked).
+    "B0BSHF7WHW", "B0CHX1W1XY", "B0D1XD1ZV3", "B09G9FPHY6", "B07WFPMPX3", "B08L5WD9D6",
+)
+
+
+def harvest_live_asins(n: int, query: str) -> list[str]:
+    """Real ASINs from an amazon.in search, so the live journey checks real
+    product pages. Falls back to a fixed list (rows that don't exist simply
+    come back as Not Found — still a full journey)."""
+    found: list[str] = []
+    try:
+        from curl_cffi import requests as creq
+
+        for page in (1, 2, 3):
+            r = creq.get(f"https://www.amazon.in/s?k={query}&page={page}", impersonate="chrome",
+                         headers={"Accept-Language": "en-IN,en;q=0.9"}, timeout=30)
+            for a in re.findall(r'data-asin="(B0[A-Z0-9]{8})"', r.text):
+                if a not in found:
+                    found.append(a)
+            print(f"search page {page}: HTTP {r.status_code}, {len(found)} ASINs so far", flush=True)
+            if len(found) >= n:
+                break
+            time.sleep(2)
+    except Exception as e:  # noqa: BLE001
+        print(f"(could not harvest ASINs: {type(e).__name__}: {e})", flush=True)
+    for a in _FALLBACK_LIVE_ASINS:
+        if len(found) >= n:
+            break
+        if a not in found:
+            found.append(a)
+    return found[:n]
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):   # the Windows CI console is cp1252; reports contain ₹
         try:
@@ -289,30 +333,44 @@ def main() -> int:
                     help="Chrome is installed: require the Chrome check to price the browser-only rows")
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--artifacts", default="e2e-artifacts")
+    ap.add_argument("--live", action="store_true",
+                    help="real amazon.in instead of the simulator (needs internet): checks the app "
+                         "survives a real run end to end; doesn't require every row to be priced")
+    ap.add_argument("--live-query", default="lapcare")
     args = ap.parse_args()
 
     lic = FakeLicenseServer(args.license_port)
-    catalog = make_catalog(args.asins, seed=21, kinds={"unavailable": 0.05, "no_offer": 0.05})
-    browser_only = [a for a, p in catalog.items() if p.kind == "in_stock"][:args.browser_only]
-    # Offers page in a layout the tool won't trust, so those rows really go to Chrome.
-    sim = SimAmazon(catalog, ThrottlePolicy(burst=60, sustained_rps=10, anon_burst=30, ip_ceiling_rps=30),
-                    padding_kb=80, aod_layout="changed", browser_only=set(browser_only)).start()
     tmp = Path(tempfile.mkdtemp(prefix="pv_e2e_"))
     csv_path = tmp / "vendor list.csv"
-    with open(csv_path, "w", encoding="utf-8") as f:
-        f.write("ASIN No.,Brand Name,SP\n")
-        for i, p in enumerate(catalog.values()):
-            f.write(f"{p.asin},{p.brand},{(p.price if i % 5 else p.price + 20):.0f}\n")
+    sim = None
+    if args.live:
+        live_asins = harvest_live_asins(args.asins, args.live_query)
+        n_rows = len(live_asins)
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("ASIN No.,Brand Name,SP\n")
+            for i, a in enumerate(live_asins):
+                f.write(f"{a},Brand {i % 3},{499 + i}\n")
+    else:
+        catalog = make_catalog(args.asins, seed=21, kinds={"unavailable": 0.05, "no_offer": 0.05})
+        n_rows = len(catalog)
+        browser_only = [a for a, p in catalog.items() if p.kind == "in_stock"][:args.browser_only]
+        # Offers page in a layout the tool won't trust, so those rows really go to Chrome.
+        sim = SimAmazon(catalog, ThrottlePolicy(burst=60, sustained_rps=10, anon_burst=30, ip_ceiling_rps=30),
+                        padding_kb=80, aod_layout="changed", browser_only=set(browser_only)).start()
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("ASIN No.,Brand Name,SP\n")
+            for i, p in enumerate(catalog.values()):
+                f.write(f"{p.asin},{p.brand},{(p.price if i % 5 else p.price + 20):.0f}\n")
 
     j = Journey(args)
     ok = False
     try:
-        j.launch(sim.base_url)
+        j.launch(sim.base_url if sim else None)
         j.activation()
-        run_id, _ = j.run(csv_path, len(catalog))
+        run_id, _ = j.run(csv_path, n_rows)
         j.outputs(run_id)
         runs = [b for path, b in lic.calls if path == "/authorize-run"]
-        j.check(len(runs) == 1 and runs[0].get("asin_count") == len(catalog) and runs[0].get("product") == "price_verifier",
+        j.check(len(runs) == 1 and runs[0].get("asin_count") == n_rows and runs[0].get("product") == "price_verifier",
                 "the license server authorized exactly this run, for price_verifier")
         ok = True
         j.say("ALL END-TO-END CHECKS PASSED")
@@ -321,13 +379,14 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 — report anything as a failure with context
         j.say(f"FAIL unexpected {type(e).__name__}: {e}")
     finally:
-        if not ok:
+        if not ok or args.live:   # a live run always shows what really happened
             try:
                 j.diagnose()
             except Exception as e:  # noqa: BLE001
                 print(f"(diagnostics failed: {type(e).__name__}: {e})")
         j.stop()
-        sim.stop()
+        if sim is not None:
+            sim.stop()
         lic.stop()
         out = Path(args.artifacts)
         out.mkdir(parents=True, exist_ok=True)

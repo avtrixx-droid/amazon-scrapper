@@ -116,3 +116,40 @@ jobs:
           name: e2e-windows-logs
           path: e2e-artifacts\
           retention-days: 14
+
+  # The same journey against REAL amazon.in (real HTTPS, real throttling,
+  # real pages) — the conditions the simulator can't reproduce. Checks that
+  # the app survives a real run end to end and prints what happened; it
+  # doesn't require every row to be priced (Amazon may block CI addresses).
+  live-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r price_verifier/requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build a test .exe wired to the fake license server
+        run: |
+          python -c "open('price_verifier/_build_config.py', 'w').write('SERVER_URL = ' + repr('http://127.0.0.1:8123') + chr(10))"
+          pyinstaller price_verifier_windows.spec --clean --noconfirm --distpath dist-live --workpath build-live
+
+      - name: Live journey on the built .exe against amazon.in
+        run: python -m price_verifier.tests.e2e_frozen --exe dist-live\PriceVerificationTool.exe --live --asins 40 --expect-chrome --timeout 2700 --artifacts live-artifacts
+
+      - name: Upload app logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-windows-logs
+          path: live-artifacts\
+          retention-days: 14
