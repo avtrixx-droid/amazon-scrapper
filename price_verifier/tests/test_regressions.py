@@ -200,11 +200,11 @@ class ConcurrentCountTests(unittest.TestCase):
 
 
 class FrozenWindowsRuntimeTests(unittest.TestCase):
-    """The windowed Windows .exe failure behind "Lost connection to the
-    progress feed": the Chrome check starts Chrome through multiprocessing,
-    which re-launches the .exe; without freeze_support() that copy ran the
-    whole app again as a second server on the same port (Windows lets it bind
-    because Werkzeug sets SO_REUSEADDR)."""
+    """Safeguards for the windowed Windows .exe ("Lost connection to the
+    progress feed"): a second copy of the app — a multiprocessing child
+    without freeze_support(), or the .exe started again while the first,
+    windowless copy still runs — must never become a second server on the
+    same port (Windows allows it because Werkzeug sets SO_REUSEADDR)."""
 
     def test_freeze_support_runs_before_anything_else(self):
         src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")

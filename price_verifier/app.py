@@ -738,11 +738,12 @@ def _harden_runtime() -> None:
 
 def _exclusive_port_on_windows() -> None:
     """Werkzeug binds with SO_REUSEADDR, which on Windows lets a SECOND
-    process bind the same port while we're serving on it — requests then
-    land on whichever process Windows picks, and a run's progress page
-    talks to a server that has never heard of the run. Bind exclusively
-    instead, so a second copy fails to bind and _already_running() handles
-    it."""
+    process bind the same port while we're serving on it (e.g. the .exe
+    double-clicked again while the first copy, which has no window, is still
+    running) — requests then land on whichever process Windows picks, and a
+    run's progress page talks to a server that has never heard of the run.
+    Bind exclusively instead, so a second copy fails to bind and
+    _already_running() handles it."""
     if sys.platform != "win32":
         return
     import werkzeug.serving as ws
@@ -823,10 +824,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # MUST come first. The Chrome check (undetected-chromedriver) starts
-    # Chrome through multiprocessing; on Windows that re-launches THIS .exe
-    # for the helper process. Without freeze_support() that copy ran the
-    # whole app again — a second web server on our port, splitting the
-    # browser's requests ("Lost connection to the progress feed").
+    # MUST come first. Any multiprocessing child of a frozen Windows .exe
+    # re-launches THIS .exe; without freeze_support() that copy would run the
+    # whole app again as a second web server. We start Chrome with
+    # use_subprocess=True (no multiprocessing), so this is a safeguard —
+    # undetected-chromedriver does ship a multiprocessing-based launcher.
     multiprocessing.freeze_support()
     main()

@@ -275,6 +275,11 @@ class Journey:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):   # the Windows CI console is cp1252; reports contain ₹
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description="End-to-end check of the built Price Verification Tool")
     ap.add_argument("--exe", required=True)
     ap.add_argument("--license-port", type=int, default=8123)

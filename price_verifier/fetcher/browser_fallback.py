@@ -122,13 +122,47 @@ def _cleanup_all_temp_dirs() -> None:
 
 
 # ── Chrome detection (port of scraper.py detect_chrome_major_version) ─────────
-def _chrome_candidates(platform: str, env: dict) -> list[str]:
+# On Windows the version is read WITHOUT starting Chrome: `chrome.exe --version`
+# prints nothing there (it tries to open a browser window instead), and the
+# BLBeacon registry key only exists once Chrome has been opened at least once
+# — so on a PC where Chrome was installed but never opened (or a fresh
+# machine) relying on those two reported "Chrome not found".
+_FULL_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$")
+
+
+def _read_windows_app_paths() -> list[str]:
+    """chrome.exe as registered under App Paths (covers non-standard install
+    folders). Empty list off Windows or when not registered."""
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return []
+    found = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            key = winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+            try:
+                value, _ = winreg.QueryValueEx(key, "")
+            finally:
+                winreg.CloseKey(key)
+            if value:
+                found.append(str(value).strip().strip('"'))
+        except OSError:
+            continue
+    return found
+
+
+def _chrome_candidates(platform: str, env: dict, app_paths: Callable[[], list[str]] = _read_windows_app_paths) -> list[str]:
     candidates: list[str] = []
     if config.CHROME_BINARY:
         candidates.append(config.CHROME_BINARY)
     if platform == "darwin":
         candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     elif platform.startswith("win"):
+        try:
+            candidates.extend(app_paths())
+        except Exception:
+            pass
         candidates.extend([
             os.path.join(env.get("PROGRAMFILES", "C:\\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
             os.path.join(env.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
@@ -136,7 +170,65 @@ def _chrome_candidates(platform: str, env: dict) -> list[str]:
         ])
     else:
         candidates.extend(["google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"])
-    return candidates
+    seen, unique = set(), []
+    for c in candidates:
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            unique.append(c)
+    return unique
+
+
+def _windows_file_version(path: str) -> Optional[str]:
+    """chrome.exe's own version resource (what Explorer shows under
+    Properties > Details), e.g. "154.0.8037.58". None off Windows / on error."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        ver = ctypes.WinDLL("version", use_last_error=True)
+        ver.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        ver.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        ver.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+        ver.GetFileVersionInfoW.restype = wintypes.BOOL
+        ver.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+        ver.VerQueryValueW.restype = wintypes.BOOL
+
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, buf):
+            return None
+        ptr, length = ctypes.c_void_p(), wintypes.UINT()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(length)) or length.value < 16:
+            return None
+        # VS_FIXEDFILEINFO: dwSignature, dwStrucVersion, dwFileVersionMS, dwFileVersionLS, ...
+        fixed = ctypes.cast(ptr, ctypes.POINTER(wintypes.DWORD * 4)).contents
+        if fixed[0] != 0xFEEF04BD:
+            return None
+        ms, ls = fixed[2], fixed[3]
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    except Exception:
+        return None
+
+
+def _version_from_install_dir(exe: str, listdir: Callable[[str], list[str]] = os.listdir) -> Optional[str]:
+    """Chrome on Windows keeps its files in a folder named after its version,
+    next to chrome.exe (...\\Application\\154.0.8037.58\\). While an update
+    is pending two such folders exist; the older one is the version running."""
+    try:
+        names = listdir(os.path.dirname(exe))
+    except OSError:
+        return None
+    versions = sorted((tuple(int(x) for x in m.groups()), n)
+                      for n in names for m in [_FULL_VERSION_RE.match(n)] if m)
+    if not versions:
+        return None
+    pending = "new_chrome.exe" in {n.lower() for n in names}
+    return versions[0][1] if pending and len(versions) > 1 else versions[-1][1]
 
 
 def _read_windows_registry_version() -> Optional[str]:
@@ -162,6 +254,11 @@ def _run_version(exe: str) -> str:
     return subprocess.check_output([exe, "--version"], stderr=subprocess.STDOUT, text=True, timeout=5).strip()
 
 
+def _major(version: Optional[str]) -> Optional[int]:
+    m = re.search(r"(\d+)\.", version or "")
+    return int(m.group(1)) if m else None
+
+
 def detect_chrome_major_version(
     *,
     platform: str = sys.platform,
@@ -169,29 +266,39 @@ def detect_chrome_major_version(
     run: Callable[[str], str] = _run_version,
     registry_reader: Callable[[], Optional[str]] = _read_windows_registry_version,
     isfile: Callable[[str], bool] = os.path.isfile,
+    file_version: Callable[[str], Optional[str]] = _windows_file_version,
+    listdir: Callable[[str], list[str]] = os.listdir,
+    app_paths: Callable[[], list[str]] = _read_windows_app_paths,
 ) -> tuple[Optional[int], Optional[str]]:
-    """Returns (major_version, chrome_exe_path); either may be None. On
-    Windows the registry is tried first (more reliable than a subprocess in
-    a frozen build), then each candidate binary's `--version` output."""
+    """Returns (major_version, chrome_exe_path); either may be None.
+
+    Windows: never starts Chrome. For each installed chrome.exe, its version
+    resource, else its version-named folder; then the BLBeacon registry key.
+    Elsewhere: each candidate's `--version` output."""
     env = dict(os.environ) if env is None else env
-    candidates = _chrome_candidates(platform, env)
+    candidates = _chrome_candidates(platform, env, app_paths)
 
     if platform.startswith("win"):
-        version = registry_reader()
-        if version:
-            m = re.search(r"(\d+)\.", version)
-            if m:
-                exe = next((p for p in candidates if isfile(p)), None)
-                return int(m.group(1)), exe
+        installed = [p for p in candidates if isfile(p)]
+        for exe in installed:
+            major = _major(file_version(exe)) or _major(_version_from_install_dir(exe, listdir))
+            if major:
+                return major, exe
+        major = _major(registry_reader())
+        if major:
+            return major, (installed[0] if installed else None)
+        logger.warning("Google Chrome not found (looked at: %s)", "; ".join(candidates))
+        return None, None
 
     for exe in candidates:
         try:
             out = run(exe)
         except Exception:
             continue
-        m = re.search(r"(\d+)\.", out or "")
-        if m:
-            return int(m.group(1)), exe
+        major = _major(out)
+        if major:
+            return major, exe
+    logger.warning("Google Chrome not found (tried: %s)", ", ".join(candidates))
     return None, None
 
 
@@ -201,7 +308,8 @@ _AVAILABLE_LOCK = threading.Lock()
 
 def chrome_available(refresh: bool = False) -> bool:
     """True if undetected-chromedriver imports AND a Chrome install is found.
-    Cached for the process (pass refresh=True to re-probe). Never raises."""
+    A found Chrome is cached for the process (refresh=True re-probes); a
+    missing one is probed again next time. Never raises."""
     global _AVAILABLE
     with _AVAILABLE_LOCK:
         if _AVAILABLE is not None and not refresh:
@@ -214,9 +322,12 @@ def chrome_available(refresh: bool = False) -> bool:
         try:
             major, _exe = detect_chrome_major_version()
         except Exception:
+            logger.warning("Chrome detection failed", exc_info=True)
             major = None
-        _AVAILABLE = major is not None
-        return _AVAILABLE
+        # Only a positive answer is cached: if Chrome gets installed (or
+        # opened) after a run, the next Retry finds it without a restart.
+        _AVAILABLE = True if major is not None else None
+        return major is not None
 
 
 # ── Driver construction (port of scraper.py build_driver) ─────────────────────

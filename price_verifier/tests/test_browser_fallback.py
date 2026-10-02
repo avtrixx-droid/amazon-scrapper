@@ -247,20 +247,59 @@ class DetectionTests(unittest.TestCase):
                                                  run=lambda exe: "Google Chrome 147.0.1.2")
         self.assertEqual(got, (147, "/opt/chrome/chrome"))
 
-    def test_windows_registry_first(self):
+    def _win(self, **kw):
+        base = dict(platform="win32", env={"PROGRAMFILES": "C:\\PF"}, app_paths=lambda: [],
+                    registry_reader=lambda: None, file_version=lambda p: None, listdir=lambda d: [],
+                    isfile=lambda p: p.startswith("C:\\PF"),
+                    run=lambda exe: self.fail("Chrome must never be started to read its version on Windows"))
+        base.update(kw)
         with mock.patch.object(config, "CHROME_BINARY", None):
-            got = bf.detect_chrome_major_version(
-                platform="win32", env={"PROGRAMFILES": "C:\\PF"}, registry_reader=lambda: "139.0.7258.66",
-                isfile=lambda p: p.startswith("C:\\PF"), run=lambda exe: self.fail("subprocess not needed"),
-            )
+            return bf.detect_chrome_major_version(**base)
+
+    def test_windows_reads_the_exe_version_resource(self):
+        got = self._win(file_version=lambda p: "154.0.8037.58")
+        self.assertEqual(got[0], 154)
+        self.assertTrue(got[1].startswith("C:\\PF") and got[1].endswith("chrome.exe"))
+
+    def test_windows_never_opened_chrome_is_still_found(self):
+        """The CI failure: Chrome installed but never opened — no BLBeacon
+        registry key, and `chrome.exe --version` prints nothing on Windows."""
+        got = self._win(listdir=lambda d: ["154.0.8037.58", "chrome.exe", "chrome_proxy.exe", "SetupMetrics"])
+        self.assertEqual(got[0], 154)
+
+    def test_windows_pending_update_uses_the_running_version(self):
+        got = self._win(listdir=lambda d: ["153.0.7900.10", "154.0.8037.58", "chrome.exe", "new_chrome.exe"])
+        self.assertEqual(got[0], 153)
+        got = self._win(listdir=lambda d: ["9.0.0.1", "153.0.7900.10", "chrome.exe"])
+        self.assertEqual(got[0], 153, "numeric, not alphabetical, ordering")
+
+    def test_windows_registry_is_the_last_resort(self):
+        got = self._win(registry_reader=lambda: "139.0.7258.66")
         self.assertEqual(got[0], 139)
         self.assertTrue(got[1].startswith("C:\\PF"))
+        self.assertEqual(self._win(registry_reader=lambda: "139.0.7258.66", isfile=lambda p: False), (139, None))
 
-    def test_windows_falls_back_to_version_command(self):
-        with mock.patch.object(config, "CHROME_BINARY", None):
-            got = bf.detect_chrome_major_version(platform="win32", env={}, registry_reader=lambda: None,
-                                                 run=lambda exe: "Google Chrome 138.0.1")
-        self.assertEqual(got[0], 138)
+    def test_windows_app_paths_install_location(self):
+        got = self._win(app_paths=lambda: ["D:\\Apps\\Chrome\\chrome.exe"], isfile=lambda p: p.startswith("D:"),
+                        file_version=lambda p: "150.0.1.2" if p.startswith("D:") else None)
+        self.assertEqual(got, (150, "D:\\Apps\\Chrome\\chrome.exe"))
+
+    def test_windows_nothing_found(self):
+        self.assertEqual(self._win(isfile=lambda p: False), (None, None))
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "reads the real Chrome install on Windows")
+    def test_real_windows_chrome(self):
+        exe = os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"),
+                           "Google", "Chrome", "Application", "chrome.exe")
+        if not os.path.isfile(exe):
+            self.skipTest("Chrome not installed")
+        from_resource = bf._windows_file_version(exe)
+        self.assertRegex(from_resource or "", r"^\d+\.\d+\.\d+\.\d+$")
+        self.assertEqual(from_resource, bf._version_from_install_dir(exe))
+        major, found = bf.detect_chrome_major_version(registry_reader=lambda: None,
+                                                      run=lambda e: self.fail("must not start Chrome"))
+        self.assertEqual(major, int(from_resource.split(".")[0]))
+        self.assertTrue(found and os.path.isfile(found))
 
     def test_nothing_found(self):
         def run(exe):
@@ -269,12 +308,15 @@ class DetectionTests(unittest.TestCase):
         with mock.patch.object(config, "CHROME_BINARY", None):
             self.assertEqual(bf.detect_chrome_major_version(platform="darwin", env={}, run=run), (None, None))
 
-    def test_chrome_available_is_cached_and_refreshable(self):
+    def test_chrome_available_caches_found_but_rechecks_missing(self):
         with mock.patch.object(bf, "detect_chrome_major_version", return_value=(None, None)):
             self.assertFalse(bf.chrome_available(refresh=True))
+        # installed / opened after a run: the next Retry finds it, no app restart
         with mock.patch.object(bf, "detect_chrome_major_version", return_value=(131, "chrome")):
-            self.assertFalse(bf.chrome_available(), "cached")
-            self.assertTrue(bf.chrome_available(refresh=True))
+            self.assertTrue(bf.chrome_available())
+        with mock.patch.object(bf, "detect_chrome_major_version", return_value=(None, None)):
+            self.assertTrue(bf.chrome_available(), "a found Chrome is cached")
+            self.assertFalse(bf.chrome_available(refresh=True))
         bf._AVAILABLE = None
 
     def test_chrome_unavailable_when_uc_missing(self):

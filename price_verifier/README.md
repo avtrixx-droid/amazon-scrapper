@@ -122,6 +122,16 @@ pass 3 is skipped, and those rows become retryable Could-Not-Verify rows
 rather than wrong answers. The first Chrome run downloads a matching
 chromedriver into `data/uc_cache`.
 
+On Windows, Chrome's version is read without starting Chrome: from
+`chrome.exe`'s own version resource, else the version-named folder next to it
+(`Application\154.0.8037.58\`), and only then the `BLBeacon` registry key.
+Chrome is located through the standard install folders and its "App Paths"
+registry entry. The older approach (`BLBeacon`, then `chrome.exe --version`)
+reported "Chrome not found" on any PC where Chrome was installed but never
+opened: that key is written on first launch, and `--version` prints nothing
+on Windows. A "not found" result is not cached, so after installing Chrome a
+Retry finds it without restarting the app.
+
 ### 4. Parser accuracy (`fetcher/parser.py`)
 
 The price and MRP are read only from the core price and buy-box containers,
@@ -192,16 +202,24 @@ drives it the way the vendor does:
 4. Check results, the Excel download and history.
 
 It fails if the app process dies, or if any request is answered by a
-second copy of the app. The app's `logs/` folder is uploaded as the
-`e2e-windows-logs` artifact.
+second copy of the app. On failure it prints the Could Not Verify reasons
+and every warning, error and traceback from the app's logs into the job
+output. The app's `logs/` folder is also uploaded as the `e2e-windows-logs`
+artifact.
 
-That second-copy case is the bug behind "Lost connection to the progress
-feed": undetected-chromedriver starts Chrome through `multiprocessing`, which
-re-launches the `.exe`. Before the fix, that copy started the whole app
-again, as a second server on the same port, because Werkzeug's
-`SO_REUSEADDR` lets that happen on Windows. Fixed by calling
-`multiprocessing.freeze_support()` first in `app.py` and binding the port
-exclusively on Windows.
+The journey runs before anything else has started Chrome on the runner, so
+it meets Chrome's first launch on a fresh machine, as a vendor's first run
+does. That is how the "Chrome not found" detection bug above was caught. It
+passed only when an earlier step had already opened Chrome.
+
+Safeguards against a second copy of the app on the same port: Werkzeug's
+`SO_REUSEADDR` lets two processes bind one port on Windows, so the port is
+bound exclusively, and `multiprocessing.freeze_support()` runs first in
+`app.py`. A second copy can appear if the windowless `.exe` is started again
+while the first is still running. These safeguards came with the "Lost
+connection to the progress feed" report, but that crash was never reproduced
+before the fix, so its exact cause is unconfirmed. If it happens again,
+`logs/app.log`, `logs/crash.log` and `logs/console.log` record why.
 
 **If the app ever stops:** `logs/app.log` holds the run log and any
 uncaught exception from any thread. `logs/crash.log` holds a stack dump of
@@ -266,10 +284,9 @@ Windows-like disk latency.
 - **"Lowest price across all sellers"** (`DEFAULT_PRICE_SOURCE = "lowest"`)
   is not implemented. A product page only shows the Buy Box price, so this
   would need the `/gp/offer-listing/` page.
-- **The Chrome pass has never run against a real Chrome here.** The
-  sandbox's Chromium and chromedriver versions do not match. It is covered
-  by tests using a fake driver, and it only handles rows the HTTP passes
-  could not settle.
+- **The Chrome pass is tested only against the fake Amazon.** In CI it runs
+  in the built `.exe` with the real Chrome on `windows-latest` (see Windows
+  end-to-end), but never against live amazon.in pages.
 
 ## License key
 
