@@ -307,7 +307,8 @@ def _build_uc_driver(headless: bool, user_data_dir: str):
         return start(major)
     except Exception as first:
         msg = str(first)
-        logger.warning("Chrome start failed: %s", msg.splitlines()[0] if msg else type(first).__name__)
+        logger.warning("Chrome start failed: %s", msg.splitlines()[0] if msg else type(first).__name__,
+                       exc_info=(type(first), first, first.__traceback__))
         if "only supports chrome version" in msg.lower() or "session not created" in msg.lower():
             _clear_uc_cache()
             try:

@@ -100,6 +100,7 @@ class Journey:
         self.proc: subprocess.Popen | None = None
         self.pids: set[str] = set()
         self.log: list[str] = []
+        self.run_id: str | None = None
         self.http = httpx.Client(base_url=APP, follow_redirects=False, trust_env=False, timeout=90)
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -172,6 +173,7 @@ class Journey:
                                            "tolerance_pct": "0", "use_browser": "1"})
         self.check(r.status_code == 302 and "/progress/" in r.headers["location"], "run started")
         run_id = r.headers["location"].rsplit("/", 1)[-1]
+        self.run_id = run_id
         self.check(self.http.get(f"/progress/{run_id}").status_code == 200, "progress page opens")
 
         t0, last, deadline = time.time(), None, time.time() + self.args.timeout
@@ -219,6 +221,42 @@ class Journey:
         for _ in range(20):
             self.alive()
         self.check(len(self.pids) == 1, "every request answered by one and the same app process")
+
+    def diagnose(self):
+        """Print why it failed into the job output itself (the uploaded logs
+        artifact isn't always reachable): the Could Not Verify reasons, then
+        every warning/error and traceback the app logged."""
+        print("=" * 30 + " DIAGNOSTICS " + "=" * 30, flush=True)
+        if self.run_id:
+            try:
+                r = self.http.get(f"/download/{self.run_id}")
+                wb = load_workbook(io.BytesIO(r.content), read_only=True)
+                if "Could Not Verify" in wb.sheetnames:
+                    print("-- Could Not Verify sheet --")
+                    for row in wb["Could Not Verify"].iter_rows(values_only=True):
+                        print("   ", " | ".join("" if v is None else str(v) for v in row))
+            except Exception as e:  # noqa: BLE001
+                print(f"(report not available: {type(e).__name__}: {e})")
+        logs = self.exe.parent / "logs"
+        for name in ("app.log", "crash.log", "console.log", "startup.log"):
+            f = logs / name
+            if not f.exists() or not f.stat().st_size:
+                continue
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            if name == "app.log":
+                keep, in_tb = [], False
+                for ln in lines:
+                    if re.search(r"\b(WARNING|ERROR|CRITICAL)\b", ln):
+                        keep.append(ln)
+                        in_tb = False
+                    elif ln.startswith(("Traceback", "  ", "\t")) or in_tb:
+                        keep.append(ln)
+                        in_tb = not re.match(r"^\d{4}-\d\d-\d\d", ln)
+                lines = keep
+            print(f"-- logs/{name} ({len(lines)} lines shown, last 400) --")
+            for ln in lines[-400:]:
+                print("   ", ln)
+        print("=" * 73, flush=True)
 
     def stop(self):
         if self.proc is None or self.proc.poll() is not None:
@@ -278,6 +316,11 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 — report anything as a failure with context
         j.say(f"FAIL unexpected {type(e).__name__}: {e}")
     finally:
+        if not ok:
+            try:
+                j.diagnose()
+            except Exception as e:  # noqa: BLE001
+                print(f"(diagnostics failed: {type(e).__name__}: {e})")
         j.stop()
         sim.stop()
         lic.stop()

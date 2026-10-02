@@ -982,6 +982,8 @@ class _Pipeline:
                 await _chrome_call(fetcher.start, timeout=self.t.browser_start_timeout, on_abandon=fetcher.close)
             except Exception as e:
                 self.stats.browser_available = False
+                logger.warning("Chrome could not start for the double-check: %s", e,
+                               exc_info=(type(e), e, e.__traceback__))
                 if isinstance(e, browser_fallback.BrowserUnavailable):
                     msg = str(e)
                 elif isinstance(e, ChromeCallTimeout):

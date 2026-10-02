@@ -97,6 +97,12 @@ jobs:
         shell: pwsh
         run: (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
 
+      # Same Chrome start as the .exe's Chrome check, but from source: tells a
+      # frozen-build problem apart from a Chrome/ChromeDriver/network one.
+      - name: Chrome check from source (diagnostic)
+        continue-on-error: true
+        run: python -c "import logging; logging.basicConfig(level=logging.INFO); from price_verifier.fetcher.browser_fallback import BrowserFetcher; f = BrowserFetcher(); f.start(); print('CHROME STARTED FROM SOURCE OK'); f.close()"
+
       - name: End-to-end journey on the built .exe
         run: python -m price_verifier.tests.e2e_frozen --exe dist-e2e\PriceVerificationTool.exe --expect-chrome --artifacts e2e-artifacts
 
