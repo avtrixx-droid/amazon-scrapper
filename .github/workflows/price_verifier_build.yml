@@ -153,3 +153,26 @@ jobs:
           name: live-windows-logs
           path: live-artifacts\
           retention-days: 14
+
+  # Real amazon.in pages through the tool's own fetcher, each parsed in its
+  # own subprocess with each selectolax engine — which (if any) crashes, and
+  # what the parser reads from today's live HTML. Prints a few pages
+  # gzip+base64 so they can become parser test fixtures.
+  probe-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r price_verifier/requirements.txt
+
+      - name: Probe live pages
+        run: python -m price_verifier.tests.live_probe --asins 14 --dump 4
