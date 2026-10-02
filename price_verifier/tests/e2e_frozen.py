@@ -376,6 +376,15 @@ def main() -> int:
             for i, p in enumerate(catalog.values()):
                 f.write(f"{p.asin},{p.brand},{(p.price if i % 5 else p.price + 20):.0f}\n")
 
+    # Every journey starts unlicensed (it checks activation): remove a
+    # license file an earlier journey on this machine left behind.
+    try:
+        from price_verifier import licensing
+
+        licensing.client().license_path().unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"(could not clear the license file: {e})", flush=True)
+
     j = Journey(args)
     ok = False
     try:

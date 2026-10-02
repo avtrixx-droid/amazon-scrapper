@@ -71,6 +71,33 @@ class RealProductPageTests(unittest.TestCase):
                 self.assertIsNone(p["price"])
                 self.assertEqual(p["brand"], "Apple")
 
+    def test_real_in_stock_pages_read_price_mrp_seller_brand(self):
+        """Chrome-rendered live pages (1.7–2.1 MB), as the Chrome check sees them."""
+        for name, asin, want in (
+            ("B0CN6NSPLF_chrome_priced.html.gz", "B0CN6NSPLF",
+             dict(price=222.0, mrp=599.0, seller="Clicktech Retail Private Ltd", brand="Lapcare",
+                  title="LAPCARE Safari III B Wireless Mouse")),
+            ("B0FKZYZTMR_chrome_priced.html.gz", "B0FKZYZTMR",
+             dict(price=699.0, mrp=1699.0, seller="Clicktech Retail Private Ltd", brand="SpinBot",
+                  title="SpinBot Clutch GT500 Wireless Gaming Mouse")),
+        ):
+            with self.subTest(name=name):
+                p = parse_isolated(name, asin)
+                self.assertEqual(p["kind"], "product")
+                self.assertTrue(p["title"].startswith(want.pop("title")), p["title"])
+                self.assertIs(p["in_stock"], True)
+                self.assertFalse(p["no_featured_offer"])
+                for field, value in want.items():
+                    self.assertEqual(p[field], value, field)
+
+    def test_real_in_stock_page_compares_against_the_expected_price(self):
+        html = read("B0CN6NSPLF_chrome_priced.html.gz")
+        parsed = parser.parse_product_page(html, "B0CN6NSPLF")
+        fetch = FetchResult(asin="B0CN6NSPLF", status_code=None, html=html, source="browser")
+        self.assertEqual(runner.classify(fetch, parsed, 222.0, 1.0, 0.0)[0], "matched")
+        self.assertEqual(runner.classify(fetch, parsed, 223.0, 1.0, 0.0)[0], "matched")    # ₹1 tolerance
+        self.assertEqual(runner.classify(fetch, parsed, 249.0, 1.0, 0.0)[0], "mismatched")
+
     def test_real_unavailable_page_is_a_final_answer(self):
         html = read("unavailable_B0CHX1W1XY.html.gz")
         fetch = FetchResult(asin="B0CHX1W1XY", status_code=200, html=html)

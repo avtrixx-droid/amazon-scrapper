@@ -245,9 +245,15 @@ def _write_run_info(ws: Worksheet, run: dict, items: list[dict]) -> None:
         else:
             verdict = "not used — not enough sample rows could be compared this run"
         rows.append(("Offers-page double-check", verdict))
+    if stats.get("engine_restarts"):
+        rows.append(("Recovered from internal errors", f"{stats['engine_restarts']} time(s) — no rows lost"))
+    # Raw counters of the LATEST check only (a Resume / Retry / recovery
+    # starts a new one), for support — labelled so they aren't read as totals.
     for key, value in stats.items():
+        if key == "engine_restarts":
+            continue
         if isinstance(value, (int, float, str)) and not isinstance(value, bool):
-            rows.append((key.replace("_", " ").capitalize(), value))
+            rows.append((f"Diagnostics (latest check): {key.replace('_', ' ')}", value))
     _write_table(ws, ["Item", "Value"], [(_sanitize_cell_text(k), _sanitize_cell_text(v)) for k, v in rows],
                  widths={1: 52, 2: 40})
 

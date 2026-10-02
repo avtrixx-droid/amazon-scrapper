@@ -157,6 +157,7 @@ def main() -> int:
 
     crashes = {"modest": 0, "lexbor": 0, "tool": 0}
     priced: list[str] = []
+    kinds: dict[str, str] = {}
     for key, path in pages.items():
         asin = key.split(":", 1)[1]
         t0 = time.time()
@@ -166,13 +167,21 @@ def main() -> int:
                 crashes[engine] += 1
         if res.get("tool", {}).get("price") is not None:
             priced.append(key)
+        kinds[key] = res.get("tool", {}).get("kind", "crashed")
         print(f"== {key} ({path.stat().st_size} bytes, {time.time() - t0:.1f}s)", flush=True)
         for engine, r in res.items():
             print(f"   {engine:7s} {json.dumps(r, ensure_ascii=False)}", flush=True)
     print(f"\nCRASHES: {crashes} over {len(pages)} pages; priced by the tool: {len(priced)}\n", flush=True)
 
-    # Dump priced pages first (the ones fixtures need most), both sources.
-    order = priced + [k for k in pages if k not in priced]
+    # Dump a few of each kind (priced via HTTP / via Chrome, and every page
+    # kind the parser did NOT price), so each can become a test fixture.
+    groups: dict[str, list[str]] = {}
+    for key in pages:
+        kind = kinds.get(key, "?")
+        group = f"{key.split(':', 1)[0]}-{'priced' if key in priced else kind}"
+        groups.setdefault(group, []).append(key)
+    order = [k for keys in groups.values() for k in keys[:2]]
+    print(f"dumping {len(order[: args.dump])} pages from groups {sorted(groups)}", flush=True)
     for key in order[: args.dump]:
         blob = base64.b64encode(gzip.compress(pages[key].read_bytes(), 9)).decode()
         tag = key.replace(":", "_")

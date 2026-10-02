@@ -257,6 +257,13 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
         result = supervisor.run()
         log.info("Run %s: %s (engine restarts: %d%s)", run_id, result.status, result.restarts,
                  f"; {'; '.join(result.failures)}" if result.failures else "")
+        if result.restarts:
+            try:
+                stats = checkpoint.get_run_stats(run_id) or {}
+                stats["engine_restarts"] = result.restarts
+                checkpoint.set_run_stats(run_id, stats)
+            except Exception:
+                log.debug("could not record engine restarts", exc_info=True)
         if result.status == "cancelled":
             checkpoint.mark_run_paused(run_id)
             final_status = "paused"

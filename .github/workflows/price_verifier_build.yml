@@ -98,11 +98,16 @@ jobs:
         run: (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
 
       - name: End-to-end journey on the built .exe
-        # --kill-engine-at: the engine process is killed mid-run, as a native
-        # crash would end it — the app must stay up and still finish the run.
+        run: python -m price_verifier.tests.e2e_frozen --exe dist-e2e\PriceVerificationTool.exe --expect-chrome --artifacts e2e-artifacts
+
+      # The engine process is killed mid-run, as a native crash would end
+      # it: the app must stay up and still finish the run (no Chrome-only
+      # rows here — the restarted engine re-fetches unfinished rows).
+      - name: Crash-recovery journey on the built .exe
+        if: always()
         run: |
           pip install psutil
-          python -m price_verifier.tests.e2e_frozen --exe dist-e2e\PriceVerificationTool.exe --expect-chrome --kill-engine-at 8 --artifacts e2e-artifacts
+          python -m price_verifier.tests.e2e_frozen --exe dist-e2e\PriceVerificationTool.exe --browser-only 0 --kill-engine-at 8 --artifacts e2e-artifacts-crash
 
       # Runs AFTER the journey on purpose, so the .exe meets a cold Chrome
       # (first launch on a fresh machine), like a vendor's first run. Same
@@ -118,7 +123,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-windows-logs
-          path: e2e-artifacts\
+          path: |
+            e2e-artifacts\
+            e2e-artifacts-crash\
           retention-days: 14
 
   # The same journey against REAL amazon.in (real HTTPS, real throttling,
@@ -179,4 +186,4 @@ jobs:
           pip install -r price_verifier/requirements.txt
 
       - name: Probe live pages
-        run: python -m price_verifier.tests.live_probe --asins 14 --dump 4
+        run: python -m price_verifier.tests.live_probe --asins 14 --dump 8
