@@ -286,7 +286,28 @@ class Journey:
             print(f"-- logs/{name} ({len(lines)} lines shown, last 400) --")
             for ln in lines[-400:]:
                 print("   ", ln)
+        if self.args.live:
+            self.dump_debug_pages()
         print("=" * 73, flush=True)
+
+    def dump_debug_pages(self):
+        """A live run's unrecognised pages (and offers-page samples), printed
+        gzip+base64 between markers so they can become parser fixtures."""
+        import base64
+        import gzip
+
+        root = self.exe.parent / "data" / "debug_html"
+        if not root.exists():
+            return
+        files = sorted(root.rglob("*.html"))
+        picks = ([f for f in files if "unrecognised" in f.name][:2]
+                 + [f for f in files if "offers-sample" in f.name][:2])
+        for f in picks:
+            blob = base64.b64encode(gzip.compress(f.read_bytes(), 9)).decode()
+            print(f"=====BEGIN PAGE {f.stem[:80]}=====")
+            for i in range(0, len(blob), 4000):
+                print(blob[i:i + 4000])
+            print(f"=====END PAGE {f.stem[:80]}=====", flush=True)
 
     def stop(self):
         if self.proc is None or self.proc.poll() is not None:

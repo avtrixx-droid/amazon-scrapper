@@ -800,6 +800,11 @@ class _Pipeline:
 
             # ACTION_RETRY
             await self._db(checkpoint.note_item_attempt_failure, self.run_id, item.asin, work.last_reason)
+            if not blocked and fetch.html and reason == REASON_UNKNOWN_PAGE:
+                # A page the parser didn't recognise: keep it, that's how a
+                # new Amazon layout gets found and fixed (debug_dump is capped).
+                await self._debug(item.asin, fetch.html, f"unrecognised page: {reason}",
+                                  "offers" if ctx.fetch_kind == "offers" else "http")
             if not blocked and not ctx.aborted:
                 await self._sleep(self.t.retry_backoff * (0.5 + self._rng.random()))
 

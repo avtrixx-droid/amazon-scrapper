@@ -72,12 +72,16 @@ class RealProductPageTests(unittest.TestCase):
                 self.assertEqual(p["brand"], "Apple")
 
     def test_real_in_stock_pages_read_price_mrp_seller_brand(self):
-        """Chrome-rendered live pages (1.7–2.1 MB), as the Chrome check sees them."""
+        """Live pages as the Chrome check (1.7–2.1 MB) and the HTTP pass (0.9 MB) see them."""
         for name, asin, want in (
             ("B0CN6NSPLF_chrome_priced.html.gz", "B0CN6NSPLF",
              dict(price=222.0, mrp=599.0, seller="Clicktech Retail Private Ltd", brand="Lapcare",
                   title="LAPCARE Safari III B Wireless Mouse")),
             ("B0FKZYZTMR_chrome_priced.html.gz", "B0FKZYZTMR",
+             dict(price=699.0, mrp=1699.0, seller="Clicktech Retail Private Ltd", brand="SpinBot",
+                  title="SpinBot Clutch GT500 Wireless Gaming Mouse")),
+            # the same product over plain HTTP (curl_cffi) — the fast pass's view
+            ("B0FKZYZTMR_http_priced.html.gz", "B0FKZYZTMR",
              dict(price=699.0, mrp=1699.0, seller="Clicktech Retail Private Ltd", brand="SpinBot",
                   title="SpinBot Clutch GT500 Wireless Gaming Mouse")),
         ):
