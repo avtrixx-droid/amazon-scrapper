@@ -232,7 +232,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 416 tests) runs offline:
+The whole suite (`tests/`, 419 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -318,12 +318,17 @@ Windows-like disk latency.
 
 ### Known gaps
 
-- **Plain HTTP from a datacenter address is mostly answered with Amazon's
-  bot-check page or an unparsed ~320 KB page** (seen from GitHub's Windows
-  runners). Those rows then go to the slower Chrome check, which read every
-  real page correctly. How often this happens from the vendor's office
-  connection is only known from a run there: `Run Info` shows how many rows
-  each pass resolved. The "Continue shopping" click-through did work live.
+- **How often plain HTTP is diverted depends on the connection.** From
+  GitHub's runners, some runs got every page over plain HTTP (40/40 in
+  81 s). Others mostly got Amazon's bot-check page, or its homepage instead
+  of the product. Those are now treated as blocks: back off, use a fresh
+  session, and send rows that keep getting them to the Chrome check, which
+  read every real page correctly. `Run Info` shows how many rows each pass
+  resolved on the vendor's own connection. Live findings already handled:
+  - the "Continue shopping" click-through works;
+  - after it, Amazon can land on its homepage, so the product is requested
+    again;
+  - the offers-page check agreed with the product page on 4 of 4 rows.
 - **Offers-page layout is unverified on amazon.in.** Its parser follows the
   layout others report; the per-run self-check means a different real
   layout just leaves it switched off. The first live run's "offers-sample"

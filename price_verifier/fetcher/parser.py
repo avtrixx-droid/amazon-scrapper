@@ -599,6 +599,16 @@ def _page_title(lower: str) -> str:
     return _clean(lower[gt + 1:end])
 
 
+_GATEWAY_RE = re.compile(r'ue_pty\s*=\s*["\']Gateway["\']')
+
+
+def is_gateway_page(html: str | None) -> bool:
+    """Amazon's homepage ("Gateway"; product pages say ue_pty = "Detail").
+    Served in answer to a product request it means Amazon diverted us —
+    seen live right after its "continue shopping" interstitial."""
+    return bool(html) and _GATEWAY_RE.search(html) is not None
+
+
 def _looks_like_product(html: str, asin: str) -> bool:
     # Fast path on the raw HTML (lowercasing a 1.5 MB page costs ~8 ms):
     # Amazon's own markup uses these exact spellings and upper-case ASINs.
@@ -624,6 +634,8 @@ def classify_page(html: str, asin: str) -> str:
     title = _page_title(lower)
     if "robot check" in title or any(p in lower for p in _CAPTCHA_INDICATORS):
         return "captcha"
+    if is_gateway_page(html):
+        return "blocked"   # the homepage instead of the product: diverted, back off
     # Blocked before not_found: misreading a throttle page as a (terminal,
     # never-retried) "not found" is the costlier mistake.
     if title.startswith(_BLOCK_TITLE_PREFIXES) or any(p in lower for p in _BLOCK_INDICATORS):
@@ -719,7 +731,8 @@ def parse_offers_page(html: str, asin: str) -> ParsedProduct:
         title = _page_title(lower)
         if "robot check" in title or any(p in lower for p in _CAPTCHA_INDICATORS):
             return ParsedProduct(page_kind="captcha")
-        if title.startswith(_BLOCK_TITLE_PREFIXES) or any(p in lower for p in _BLOCK_INDICATORS):
+        if (title.startswith(_BLOCK_TITLE_PREFIXES) or any(p in lower for p in _BLOCK_INDICATORS)
+                or is_gateway_page(html)):
             return ParsedProduct(page_kind="blocked")
         if not asin or asin.lower() not in lower:
             return ParsedProduct(page_kind="unknown")

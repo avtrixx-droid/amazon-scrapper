@@ -122,6 +122,17 @@ class RealBlockPageTests(unittest.TestCase):
         _status, _reason, action = runner.classify(fetch, parsed, 100.0, 1.0, 0.0)
         self.assertEqual(action, runner.ACTION_RETRY)
 
+    def test_homepage_served_for_a_product_is_a_block(self):
+        """Seen live right after "continue shopping": Amazon's homepage
+        (ue_pty "Gateway") came back for a /dp/ request. It's a diversion —
+        back off and use a fresh session — not an unknown product layout."""
+        html = read("gateway_homepage_after_interstitial.html.gz")
+        self.assertTrue(parser.is_gateway_page(html))
+        self.assertEqual(parser.classify_page(html, "B07TS6R1SF"), "blocked")
+        for name in ("B0CN6NSPLF_chrome_priced.html.gz", "B0FKZYZTMR_http_priced.html.gz",
+                     "unavailable_B0CHX1W1XY.html.gz"):
+            self.assertFalse(parser.is_gateway_page(read(name)), name)
+
     def test_real_404_is_not_found(self):
         html = read("not_found_404_B09G9FPHY6.html")
         fetch = FetchResult(asin="B09G9FPHY6", status_code=404, html=html)

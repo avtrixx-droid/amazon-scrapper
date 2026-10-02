@@ -67,6 +67,7 @@ from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from price_verifier import config
 from price_verifier.fetcher.models import FetchResult
+from price_verifier.fetcher.parser import is_gateway_page
 
 log = logging.getLogger(__name__)
 
@@ -593,6 +594,11 @@ class FetchSession:
                 status, html = int(resp.status_code), _safe_text(resp)
                 self.interstitials_passed += 1
                 log.info("passed a 'continue shopping' page for %s (status %s)", asin, status)
+                if status == 200 and is_gateway_page(html):
+                    # Seen live: once through, Amazon lands the session on
+                    # its homepage, not back on the product — ask again.
+                    resp = await ident.client.get(path, headers={"Referer": f"{self._base_url}/"})
+                    status, html = int(resp.status_code), _safe_text(resp)
             except Exception as exc:
                 return FetchResult(asin=asin, status_code=None, html=None,
                                    error=mapper(exc), elapsed_ms=_ms_since(started))

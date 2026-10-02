@@ -198,6 +198,32 @@ class ContinueShoppingTests(unittest.TestCase):
         self.assertEqual(referer, f"{BASE}/dp/B0TEST0001")
         self.assertIsNotNone(state, "the identity that got through is worth keeping")
 
+    def test_landing_on_the_homepage_after_the_interstitial_asks_again(self):
+        """Seen live: past "continue shopping", Amazon serves its homepage
+        (ue_pty "Gateway"), not the product. The product is requested again."""
+        calls = []
+        home = '<html><script>var ue_pty = "Gateway";</script><body>home</body></html>'
+
+        def handler(req):
+            calls.append(req.url.path)
+            if req.url.path == "/errors/validateCaptcha":
+                return httpx.Response(200, text=home)
+            if req.url.path == "/dp/B0TEST0001" and calls.count("/dp/B0TEST0001") == 1:
+                return httpx.Response(200, text=CONTINUE_PAGE)
+            return httpx.Response(200, text=PRODUCT if req.url.path.startswith("/dp/") else home)
+
+        s = FetchSession(base_url=BASE, httpx_transport=httpx.MockTransport(handler))
+
+        async def go():
+            await s.start()
+            r = await s.fetch("B0TEST0001")
+            await s.close()
+            return r
+
+        r = run(go())
+        self.assertIn("productTitle", r.html)
+        self.assertEqual(calls[-3:], ["/dp/B0TEST0001", "/errors/validateCaptcha", "/dp/B0TEST0001"])
+
     def test_real_captcha_is_never_submitted(self):
         s, calls = self._session(REAL_CAPTCHA)
 
