@@ -311,7 +311,7 @@ class EngineSupervisor:
                     outcome = ("failed", "engine did not stop after Pause")
             return outcome
         finally:
-            self._reap(proc)
+            self._reap(proc, finished=outcome is not None and outcome[0] == "done")
             try:
                 out_q.close()
             except Exception:
@@ -349,13 +349,18 @@ class EngineSupervisor:
         except Exception:
             logger.exception("engine callback raised (ignored)")
 
-    def _reap(self, proc) -> None:
-        proc.join(timeout=5)
+    def _reap(self, proc, finished: bool = False) -> None:
+        # A finished engine still quits Chrome and cleans up on its way out;
+        # give it time before stopping it (its results are already in).
+        proc.join(timeout=30 if finished else 5)
         if proc.is_alive():
-            logger.warning("run %s: killing engine process %s", self.run_id, proc.pid)
+            if finished:
+                logger.info("run %s: engine %s finished but was slow to exit; stopping it", self.run_id, proc.pid)
+            else:
+                logger.warning("run %s: killing engine process %s", self.run_id, proc.pid)
             proc.kill()
             proc.join(timeout=10)
-        if proc.exitcode not in (0, None):
+        if proc.exitcode not in (0, None) and not finished:
             logger.warning("run %s: engine process %s %s", self.run_id, proc.pid, _exit_label(proc.exitcode))
             # Its Chrome (if any) has no one left to quit it.
             kill_pids(self._chrome_pids)

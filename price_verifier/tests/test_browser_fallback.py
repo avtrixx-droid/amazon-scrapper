@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from price_verifier import config
@@ -336,3 +337,65 @@ class DetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DriverCacheTests(unittest.TestCase):
+    """undetected-chromedriver re-downloads and re-patches ChromeDriver on
+    every start unless handed a driver: the first start's patched driver is
+    kept per Chrome major and reused by every later start (restarts)."""
+
+    def setUp(self):
+        import tempfile
+        import types
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.calls = []
+        tmp = Path(self.tmp.name)
+        calls = self.calls
+
+        class FakeChrome:
+            def __init__(self, **kw):
+                calls.append(kw)
+                if kw.get("version_main") == "mismatch":
+                    raise RuntimeError("session not created: only supports chrome version 153")
+                downloaded = tmp / "undetected_chromedriver"
+                downloaded.write_bytes(b"patched driver")
+                self.patcher = types.SimpleNamespace(executable_path=str(downloaded))
+
+        class FakeOptions:
+            def add_argument(self, *_):
+                pass
+
+            def add_experimental_option(self, *_):
+                pass
+
+        fake = types.ModuleType("undetected_chromedriver")
+        fake.Chrome, fake.ChromeOptions = FakeChrome, FakeOptions
+        self._patches = [
+            mock.patch.dict(sys.modules, {"undetected_chromedriver": fake,
+                                          "undetected_chromedriver.patcher": None}),
+            mock.patch.object(config, "UC_CACHE_DIR", tmp / "uc_cache"),
+            mock.patch.object(bf, "detect_chrome_major_version", return_value=(154, "/opt/chrome")),
+        ]
+        for p in self._patches:
+            p.start()
+        (tmp / "uc_cache").mkdir()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_first_start_caches_later_starts_reuse(self):
+        bf._build_uc_driver(True, "/tmp/p1")
+        self.assertNotIn("driver_executable_path", self.calls[0])
+        cached = bf._cached_driver_path(154)
+        self.assertTrue(cached.is_file())
+        bf._build_uc_driver(True, "/tmp/p2")
+        self.assertEqual(self.calls[1]["driver_executable_path"], str(cached))
+
+    def test_version_mismatch_clears_the_cache(self):
+        bf._build_uc_driver(True, "/tmp/p1")
+        self.assertTrue(bf._cached_driver_path(154).is_file())
+        bf._clear_uc_cache()
+        self.assertFalse(bf._cached_driver_path(154).is_file())

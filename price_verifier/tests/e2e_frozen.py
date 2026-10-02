@@ -381,7 +381,7 @@ def main() -> int:
     try:
         from price_verifier import licensing
 
-        licensing.client().license_path().unlink(missing_ok=True)
+        licensing.client().license_path.unlink(missing_ok=True)
     except Exception as e:  # noqa: BLE001
         print(f"(could not clear the license file: {e})", flush=True)
 

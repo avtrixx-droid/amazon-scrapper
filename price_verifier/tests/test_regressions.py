@@ -257,7 +257,7 @@ class ReadOnlyInstallFolderTests(unittest.TestCase):
             with mock.patch.object(config.sys, "frozen", True, create=True), \
                     mock.patch.object(config.sys, "executable", str(exe_dir / "PriceVerificationTool.exe")), \
                     mock.patch.dict(os.environ, {"LOCALAPPDATA": str(appdata)}):
-                self.assertEqual(config._get_base_dir(), exe_dir)
+                self.assertEqual(config._get_base_dir(), exe_dir.resolve())
                 with mock.patch.object(config, "_writable", lambda folder: False):
                     self.assertEqual(config._get_base_dir(), appdata / "PriceVerificationTool")
                 self.assertTrue((appdata / "PriceVerificationTool").is_dir())

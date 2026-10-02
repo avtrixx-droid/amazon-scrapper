@@ -93,7 +93,13 @@ detection + confirm screen, browser-grade fetching, three-pass pipeline
 with a Retry button) and is verified end-to-end against a local throttling
 fake-Amazon (`price_verifier/tests/sim_amazon.py`) — see that README's
 "Verification done so far" and "Known gaps" before treating live output
-as trustworthy.
+as trustworthy. v3: the vendor's `.exe` died seconds into every run
+("connection refused") — selectolax's Modest engine segfaults on real
+product pages; the parser now uses Lexbor, and scraping runs in a
+supervised engine process (`price_verifier/pipeline/engine.py`) so a native
+crash restarts the engine instead of killing the app. CI now also runs the
+built `.exe` against real amazon.in (`live-windows`, `probe-windows`); never
+switch the parser back to `selectolax.parser.HTMLParser`.
 
 Windows only, for now (no macOS spec). `price_verifier_windows.spec` builds
 a single-file `.exe` via PyInstaller — no Cython step. It IS license-gated,

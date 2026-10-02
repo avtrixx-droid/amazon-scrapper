@@ -367,6 +367,15 @@ def _friendly_start_error(msg: str) -> str:
     return "Chrome could not be started on this computer."
 
 
+def _cached_driver_path(major) -> Optional[Path]:
+    try:
+        major = int(major)
+    except (TypeError, ValueError):
+        return None
+    suffix = ".exe" if sys.platform.startswith("win") else ""
+    return config.UC_CACHE_DIR / f"pv_chromedriver_{major}{suffix}"
+
+
 def _clear_uc_cache() -> None:
     cache = config.UC_CACHE_DIR
     if not cache.exists():
@@ -435,7 +444,20 @@ def _build_uc_driver(headless: bool, user_data_dir: str):
             resolved = shutil.which(exe)
             if resolved:
                 kwargs["browser_executable_path"] = resolved
-        return uc.Chrome(**kwargs)
+        # Left to itself, undetected-chromedriver downloads and patches a
+        # fresh ChromeDriver on EVERY start (each Chrome restart of a run),
+        # then spends up to 3 s per instance deleting it at exit. Keep the
+        # patched driver per Chrome major and hand it back on later starts.
+        cached = _cached_driver_path(version_main)
+        if cached is not None and cached.is_file():
+            kwargs["driver_executable_path"] = str(cached)
+        driver = uc.Chrome(**kwargs)
+        if cached is not None and not cached.is_file():
+            try:
+                shutil.copy2(driver.patcher.executable_path, cached)
+            except Exception:
+                logger.debug("could not cache the patched ChromeDriver", exc_info=True)
+        return driver
 
     try:
         return start(major)

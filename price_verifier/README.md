@@ -10,8 +10,8 @@ the machine except requests to amazon.in.
 
 This tool is separate from the root repo's delivery-date scraper
 (`scraper.py`/`gui.py`). The rules in the root `CLAUDE.md` for that tool
-(Selenium-only, pincode batching, the license system, Cython) do **not**
-apply here.
+(Selenium-only, pincode batching, Cython) do **not** apply here. The license
+server is shared (see "License key").
 
 ## What the vendor asked for
 
@@ -22,6 +22,55 @@ apply here.
 - **Pincode is not a factor.** The same price applies everywhere, so there
   is no delivery-location step.
 - **Fast.** Their existing tool takes about 4 hours per 1,000 ASINs.
+
+## v3 — the app no longer dies on real Amazon pages
+
+**What the vendor saw:** a few seconds into every run the progress page said
+"Lost connection", and every refresh got "connection refused". The app had
+exited, so nothing could answer.
+
+**Root cause (reproduced on a Windows runner against amazon.in, then
+locally):** selectolax's older *Modest* HTML engine crashes the whole
+process (`Windows fatal exception: access violation` in `parser._index`)
+on real 0.7–2 MB product pages. The simulator's small pages never
+triggered it, so every earlier test passed.
+
+**Fixes:**
+
+- **Parser on the Lexbor engine** (`selectolax.lexbor`). 0 crashes on 28 real
+  amazon.in pages (HTTP and Chrome) on Windows. It reads price, MRP, seller,
+  brand and stock exactly as Amazon shows them, and is as fast or faster.
+  Real pages are now test fixtures (`tests/fixtures/live/`), each parsed in a
+  subprocess so a native crash fails the test instead of the test run.
+- **The scraping engine runs in its own supervised process**
+  (`pipeline/engine.py`). The app process only serves the pages and builds
+  the report. If the engine dies (any native crash), stops sending its
+  heartbeat (hung) or raises, the app:
+  - kills it, plus any Chrome it left behind;
+  - starts a fresh engine on the rows not finished yet (rows are saved to
+    SQLite one by one, so nothing is lost or done twice);
+  - shows "Recovering from an error — continuing with the rows left".
+
+  After 3 restarts the run ends resumable. The engine also stops by itself if
+  the app is closed. On Windows the engine uses the selector event loop, so
+  curl_cffi needs no extra selector thread.
+- **Amazon's bot-check interstitial** (an Akamai JavaScript proof-of-work
+  page, HTTP 200, `bm-verify`) is recognised as a block: back off and use a
+  fresh session. Before, it was an "unknown page" retried at full speed.
+  Rows that keep getting it go to the Chrome check, where a real browser gets
+  through it the normal way.
+- **Chrome detection on Windows** reads the version without starting Chrome.
+  Before, it failed on PCs where Chrome had never been opened.
+- **A read-only install folder** (Program Files, a locked share) no longer
+  stops the app: data goes to `%LOCALAPPDATA%\PriceVerificationTool`.
+
+**How it is verified now (every push, real Windows):**
+
+| CI job | What it does |
+|---|---|
+| `e2e-windows` | Two journeys on the built `.exe`. One prices Chrome-only rows in real Chrome. In the other, the engine process is **killed mid-run** and the run must finish 24/24 on the same app process. |
+| `live-windows` | The built `.exe` against **real amazon.in** with real ASINs (harvested from a search through Chrome). It must stay alive end to end, and it prints its logs. |
+| `probe-windows` | Real pages via HTTP and via Chrome, each parsed crash-isolated with both engines. It reports what the parser read and dumps pages for fixtures. |
 
 ## v2 — fixes after the first live test (30 ASINs)
 
@@ -183,7 +232,7 @@ throttle model is an informed guess based on the first run. If the live
 rate is lower, the AIMD limiter backs off on its own, and the recovery and
 Chrome passes pick up the rest.
 
-The whole suite (`tests/`, 389 tests) runs offline:
+The whole suite (`tests/`, 416 tests) runs offline:
 
 ```bash
 pip install -r price_verifier/requirements.txt
@@ -215,11 +264,9 @@ passed only when an earlier step had already opened Chrome.
 Safeguards against a second copy of the app on the same port: Werkzeug's
 `SO_REUSEADDR` lets two processes bind one port on Windows, so the port is
 bound exclusively, and `multiprocessing.freeze_support()` runs first in
-`app.py`. A second copy can appear if the windowless `.exe` is started again
-while the first is still running. These safeguards came with the "Lost
-connection to the progress feed" report, but that crash was never reproduced
-before the fix, so its exact cause is unconfirmed. If it happens again,
-`logs/app.log`, `logs/crash.log` and `logs/console.log` record why.
+`app.py` (it is also what lets the frozen `.exe` start its engine process).
+The "Lost connection to the progress feed" crash itself was the parser's
+native crash on real pages (see v3 above).
 
 **If the app ever stops:** `logs/app.log` holds the run log and any
 uncaught exception from any thread. `logs/crash.log` holds a stack dump of
@@ -271,11 +318,12 @@ Windows-like disk latency.
 
 ### Known gaps
 
-- **Unverified against the live site:** the "Continue shopping" click-through
-  follows the page layout reported by others; it is written to do nothing
-  unless the page matches exactly, so a different layout just falls back to
-  the normal block handling. The first live run's `data/debug_html/` pages
-  will confirm it.
+- **Plain HTTP from a datacenter address is mostly answered with Amazon's
+  bot-check page or an unparsed ~320 KB page** (seen from GitHub's Windows
+  runners). Those rows then go to the slower Chrome check, which read every
+  real page correctly. How often this happens from the vendor's office
+  connection is only known from a run there: `Run Info` shows how many rows
+  each pass resolved. The "Continue shopping" click-through did work live.
 - **Offers-page layout is unverified on amazon.in.** Its parser follows the
   layout others report; the per-run self-check means a different real
   layout just leaves it switched off. The first live run's "offers-sample"
@@ -284,9 +332,9 @@ Windows-like disk latency.
 - **"Lowest price across all sellers"** (`DEFAULT_PRICE_SOURCE = "lowest"`)
   is not implemented. A product page only shows the Buy Box price, so this
   would need the `/gp/offer-listing/` page.
-- **The Chrome pass is tested only against the fake Amazon.** In CI it runs
-  in the built `.exe` with the real Chrome on `windows-latest` (see Windows
-  end-to-end), but never against live amazon.in pages.
+- **Live checks run from GitHub's runners, not from India.** Amazon shows
+  them Mumbai 400001 as the delivery location. The vendor confirmed price
+  doesn't vary by pincode.
 
 ## License key
 
@@ -383,7 +431,8 @@ Cell text is sanitized against Excel formula injection.
   scraper build uses; it is never committed).
 - Templates ship as Python source (`templates_inline.py`), so there is no
   template folder that a frozen build could fail to find.
-- When frozen, the data directory is created next to the `.exe`.
+- When frozen, the data directory is created next to the `.exe` (or in
+  `%LOCALAPPDATA%\PriceVerificationTool` if that folder is read-only).
 
 **CI:** `.github/workflows/price_verifier_build.yml` runs on `windows-latest`
 on every push that touches `price_verifier/**` or the spec, on any branch.
@@ -407,10 +456,11 @@ price_verifier/
 │   ├── http_client.py        FetchSession: curl_cffi Chrome impersonation, warm-up, rotate(), "continue shopping" click-through; never raises
 │   ├── session_store.py      Saves one known-good session for the next run ("returning visitor"), taken once, 12 h expiry
 │   ├── browser_fallback.py   BrowserFetcher: real Chrome via undetected-chromedriver (pass 3)
-│   ├── parser.py             ALL Amazon HTML selectors (scoped to price / buy-box containers)
+│   ├── parser.py             ALL Amazon HTML selectors (scoped to price / buy-box containers); selectolax Lexbor engine
 │   ├── debug_dump.py         Saves unparseable pages to data/debug_html (7-day prune)
 │   └── models.py             FetchResult / ParsedProduct
 ├── pipeline/
+│   ├── engine.py             Runs each run in a supervised engine process: heartbeat, restart on crash/hang, Chrome cleanup
 │   ├── runner.py             classify() + three-pass pipeline (fast / recovery / browser)
 │   ├── rate_limiter.py       AdaptiveRateLimiter (AIMD + escalating block pauses)
 │   └── compare.py            Tolerance matching (±₹1)
@@ -419,4 +469,7 @@ price_verifier/
 │   └── checkpoint.py         Per-row write-through, resume / pause / retry, per-brand issue counts
 ├── excel/report.py           Full report + single-brand export
 └── tests/                    Offline suite + sim_amazon.py (fake amazon.in) + test_e2e_sim.py
+    ├── fixtures/live/        Real amazon.in pages (product, unavailable, bot-check, 404) — gzipped
+    ├── e2e_frozen.py         Drives the BUILT app like the vendor (CI: sim, crash-recovery and live amazon.in journeys)
+    └── live_probe.py         Real pages via HTTP + Chrome, parsed crash-isolated (CI probe-windows)
 ```
