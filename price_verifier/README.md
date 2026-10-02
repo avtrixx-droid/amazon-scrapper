@@ -181,6 +181,33 @@ python -m unittest discover -s price_verifier/tests -t .
 PV_SIM_BENCH=1 python -m unittest price_verifier.tests.test_e2e_sim   # + 300-ASIN benchmark
 ```
 
+**On real Windows, every push:** the `e2e-windows` CI job builds a test
+`.exe` wired to a local fake license server, and `tests/e2e_frozen.py`
+drives it the way the vendor does:
+
+1. Activate, refusing a wrong key and accepting the right one.
+2. Upload a file, with automatic column mapping.
+3. Run against the fake Amazon. Some rows can only be priced by real
+   Chrome, so the Chrome check runs inside the frozen, windowed `.exe`.
+4. Check results, the Excel download and history.
+
+It fails if the app process dies, or if any request is answered by a
+second copy of the app. The app's `logs/` folder is uploaded as the
+`e2e-windows-logs` artifact.
+
+That second-copy case is the bug behind "Lost connection to the progress
+feed": undetected-chromedriver starts Chrome through `multiprocessing`, which
+re-launches the `.exe`. Before the fix, that copy started the whole app
+again, as a second server on the same port, because Werkzeug's
+`SO_REUSEADDR` lets that happen on Windows. Fixed by calling
+`multiprocessing.freeze_support()` first in `app.py` and binding the port
+exclusively on Windows.
+
+**If the app ever stops:** `logs/app.log` holds the run log and any
+uncaught exception from any thread. `logs/crash.log` holds a stack dump of
+every thread if native code crashes. Anything printed goes to
+`logs/console.log`. All three are in the folder next to the `.exe`.
+
 To try the full app against the simulator by hand:
 
 ```bash

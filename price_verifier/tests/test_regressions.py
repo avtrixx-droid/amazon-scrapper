@@ -18,6 +18,7 @@ import io
 import tempfile
 import threading
 import time
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -196,3 +197,47 @@ class ConcurrentCountTests(unittest.TestCase):
                         run_id, it.asin, status, actual_price=10.0, db_path=db), items))
             run = checkpoint.get_run(run_id, db_path=db)
             self.assertEqual((run["matched"], run["failed"]), (60, 0))
+
+
+class FrozenWindowsRuntimeTests(unittest.TestCase):
+    """The windowed Windows .exe failure behind "Lost connection to the
+    progress feed": the Chrome check starts Chrome through multiprocessing,
+    which re-launches the .exe; without freeze_support() that copy ran the
+    whole app again as a second server on the same port (Windows lets it bind
+    because Werkzeug sets SO_REUSEADDR)."""
+
+    def test_freeze_support_runs_before_anything_else(self):
+        src = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+        block = src[src.index('if __name__ == "__main__":'):]
+        self.assertLess(block.index("multiprocessing.freeze_support()"), block.index("main()"))
+
+    def test_port_is_bound_exclusively_on_windows(self):
+        import werkzeug.serving as ws
+
+        from price_verifier import app as appmod
+
+        saved = (ws.BaseWSGIServer.allow_reuse_address, ws.BaseWSGIServer.server_bind,
+                 getattr(ws.BaseWSGIServer, "_pv_exclusive", None))
+        try:
+            with mock.patch.object(appmod.sys, "platform", "win32"):
+                appmod._exclusive_port_on_windows()
+            self.assertFalse(ws.BaseWSGIServer.allow_reuse_address)
+            self.assertTrue(ws.BaseWSGIServer._pv_exclusive)
+        finally:
+            ws.BaseWSGIServer.allow_reuse_address, ws.BaseWSGIServer.server_bind = saved[0], saved[1]
+            if saved[2] is None:
+                del ws.BaseWSGIServer._pv_exclusive
+
+    def test_stream_for_a_run_this_process_does_not_know(self):
+        from price_verifier import app as appmod
+
+        with mock.patch.dict(os.environ, {"PV_LICENSE_DISABLED": "1"}):
+            r = appmod.app.test_client().get("/stream/no-such-run")
+            self.assertIn('"status": "unknown"', r.get_data(as_text=True))
+
+    def test_healthz_names_the_process(self):
+        from price_verifier import app as appmod
+
+        r = appmod.app.test_client().get("/healthz").get_data(as_text=True)
+        self.assertIn("price-verifier-ok", r)
+        self.assertIn(f"pid={os.getpid()}", r)

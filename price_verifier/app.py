@@ -17,8 +17,10 @@ in memory here is disposable UI state.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import logging
+import multiprocessing
 import os
 import socket
 import sys
@@ -394,7 +396,10 @@ def _restart_existing_run(run_id: str):
 
 @app.route("/healthz")
 def healthz():
-    return _HEALTH_TOKEN
+    # The pid lets an automated check prove every request is answered by the
+    # SAME process (see tests/e2e_frozen.py); _already_running() only looks
+    # for the token.
+    return f"{_HEALTH_TOKEN} pid={os.getpid()}"
 
 
 @app.route("/")
@@ -589,7 +594,10 @@ def stream(run_id: str):
                 st = _RUN_STATE.get(run_id)
                 payload = _progress_payload(st) if st else None
             if payload is None:
-                yield "event: error\ndata: unknown run\n\n"
+                # Not running in this app process (restarted app, old tab):
+                # a normal message, so the page can move on instead of
+                # treating it as a dropped connection and retrying forever.
+                yield 'data: {"status": "unknown"}\n\n'
                 return
             key = json.dumps(payload, sort_keys=True)
             if key != last:
@@ -692,6 +700,67 @@ def _init_startup_log() -> None:
         pass
 
 
+_CRASH_LOG = None  # kept open for faulthandler for the life of the process
+
+
+def _harden_runtime() -> None:
+    """A windowed (console=False) frozen build has sys.stdout/sys.stderr set
+    to None and nowhere to report a crash. Give it somewhere: stray output
+    goes to logs/console.log, a native crash (e.g. inside a C extension)
+    dumps every thread's stack to logs/crash.log, and an uncaught exception
+    in any thread lands in app.log instead of vanishing."""
+    global _CRASH_LOG
+    log_dir = config.BASE_DIR / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if sys.stdout is None or sys.stderr is None:
+            stream = open(log_dir / "console.log", "a", encoding="utf-8", buffering=1)
+            sys.stdout = sys.stdout or stream
+            sys.stderr = sys.stderr or stream
+        _CRASH_LOG = open(log_dir / "crash.log", "a", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+    except Exception:
+        pass
+
+    def thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        logging.getLogger("crash").error("Uncaught exception in thread %s",
+                                         getattr(args.thread, "name", "?"),
+                                         exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    def main_hook(exc_type, exc_value, exc_tb):
+        logging.getLogger("crash").critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    threading.excepthook = thread_hook
+    sys.excepthook = main_hook
+
+
+def _exclusive_port_on_windows() -> None:
+    """Werkzeug binds with SO_REUSEADDR, which on Windows lets a SECOND
+    process bind the same port while we're serving on it — requests then
+    land on whichever process Windows picks, and a run's progress page
+    talks to a server that has never heard of the run. Bind exclusively
+    instead, so a second copy fails to bind and _already_running() handles
+    it."""
+    if sys.platform != "win32":
+        return
+    import werkzeug.serving as ws
+
+    if getattr(ws.BaseWSGIServer, "_pv_exclusive", False):
+        return
+    ws.BaseWSGIServer.allow_reuse_address = False
+    original_bind = ws.BaseWSGIServer.server_bind
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        original_bind(self)
+
+    ws.BaseWSGIServer.server_bind = server_bind
+    ws.BaseWSGIServer._pv_exclusive = True
+
+
 def _show_fatal_error(message: str) -> None:
     if sys.platform == "win32":
         try:
@@ -716,6 +785,7 @@ def _already_running() -> bool:
 
 
 def main() -> None:
+    _harden_runtime()
     _init_startup_log()
     url = f"http://{APP_HOST}:{APP_PORT}/"
     try:
@@ -731,7 +801,10 @@ def main() -> None:
             sweep_stale_profiles()
         except Exception:
             pass
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        if os.environ.get("PV_NO_BROWSER") != "1":  # automated end-to-end checks
+            threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        _exclusive_port_on_windows()
+        logging.getLogger("startup").info("serving on %s (pid %s)", url, os.getpid())
         app.run(host=APP_HOST, port=APP_PORT, debug=False, threaded=True)
     except OSError:
         logging.getLogger("startup").exception("Port %s unavailable", APP_PORT)
@@ -750,4 +823,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # MUST come first. The Chrome check (undetected-chromedriver) starts
+    # Chrome through multiprocessing; on Windows that re-launches THIS .exe
+    # for the helper process. Without freeze_support() that copy ran the
+    # whole app again — a second web server on our port, splitting the
+    # browser's requests ("Lost connection to the progress feed").
+    multiprocessing.freeze_support()
     main()

@@ -285,6 +285,12 @@ function fmt(s) {
 }
 evtSource.onmessage = function(e) {
   const d = JSON.parse(e.data);
+  lostSince = null;
+  if (d.status === "unknown") {        // not running in this copy of the app (e.g. it was restarted)
+    evtSource.close();
+    window.location.href = "/history";
+    return;
+  }
   document.getElementById("bar").value = d.done;
   document.getElementById("bar").max = d.total || 1;
   document.getElementById("count").textContent = `${d.done} / ${d.total}`;
@@ -298,6 +304,7 @@ evtSource.onmessage = function(e) {
   document.getElementById("phase").textContent = d.phase_label || "";
   if (d.status !== "running") {
     evtSource.close();
+    document.getElementById("status-line").dataset.final = "1";
     document.getElementById("cancel-btn").style.display = "none";
     if (d.status === "completed") {
       document.getElementById("status-line").textContent = "Done — opening results…";
@@ -309,8 +316,24 @@ evtSource.onmessage = function(e) {
     }
   }
 };
-evtSource.onerror = function() {
-  document.getElementById("status-line").textContent = "Lost connection to the progress feed — the check may still be running. Refresh this page.";
+// The browser re-opens a dropped feed by itself (every few seconds), firing
+// onerror each time. Check whether the app itself is still there: if it is,
+// this is a hiccup and the feed resumes; if it stays unreachable, say so
+// plainly — every finished row is already saved and the run can be resumed.
+let lostSince = null;
+evtSource.onerror = async function() {
+  const line = document.getElementById("status-line");
+  if (evtSource.readyState === EventSource.CLOSED && line.dataset.final) return;
+  if (lostSince === null) lostSince = Date.now();
+  line.textContent = "Reconnecting to the app…";
+  try {
+    const r = await fetch("/healthz", { cache: "no-store" });
+    if (r.ok) { lostSince = null; line.textContent = ""; return; }
+  } catch (e) { /* app not reachable */ }
+  if (Date.now() - lostSince > 15000) {
+    line.innerHTML = 'The Price Verification Tool has closed. Start it again — every finished row is saved, ' +
+                     'and you can <strong>Resume</strong> this run from the <a href="/">Upload</a> page.';
+  }
 };
 document.getElementById("cancel-btn").addEventListener("click", async () => {
   if (!confirm("Pause this run? Finished rows are saved — you can resume later.")) return;

@@ -62,3 +62,48 @@ jobs:
           name: PriceVerificationTool-Windows
           path: dist\Release_Windows\
           retention-days: 30
+
+  # ── End-to-end on real Windows ──────────────────────────────────────────
+  # Builds a TEST .exe wired to a local fake license server and drives it
+  # like the vendor does (tests/e2e_frozen.py): activate -> upload -> run ->
+  # results -> download, against the local fake Amazon, with rows only a real
+  # Chrome can price, so the Chrome check (undetected-chromedriver, which
+  # starts Chrome through multiprocessing) runs inside the frozen, windowed
+  # .exe. Fails if the app process dies or a second copy starts answering on
+  # its port. The app's logs are uploaded either way.
+  e2e-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r price_verifier/requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Build a test .exe wired to the fake license server
+        run: |
+          python -c "open('price_verifier/_build_config.py', 'w').write('SERVER_URL = ' + repr('http://127.0.0.1:8123') + chr(10))"
+          pyinstaller price_verifier_windows.spec --clean --noconfirm --distpath dist-e2e --workpath build-e2e
+
+      - name: Installed Chrome
+        shell: pwsh
+        run: (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
+
+      - name: End-to-end journey on the built .exe
+        run: python -m price_verifier.tests.e2e_frozen --exe dist-e2e\PriceVerificationTool.exe --expect-chrome --artifacts e2e-artifacts
+
+      - name: Upload app logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-windows-logs
+          path: e2e-artifacts\
+          retention-days: 14

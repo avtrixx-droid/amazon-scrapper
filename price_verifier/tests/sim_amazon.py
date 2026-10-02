@@ -107,7 +107,10 @@ def _fmt(v: float) -> str:
     return f"{v:,.2f}"
 
 
-def render_product(p: SimProduct, padding_kb: int = 200) -> str:
+def render_product(p: SimProduct, padding_kb: int = 200, hide_price: bool = False) -> str:
+    """hide_price: an in-stock page whose price never rendered (what Amazon
+    serves when the price block is filled in by JavaScript) — the pipeline
+    must send it to the Chrome check."""
     carousel = "".join(
         f'<li class="a-carousel-card"><span class="a-price"><span class="a-offscreen">₹{_fmt(99 + k)}</span></span>'
         f'<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">₹{_fmt(999 + k)}</span></span></li>'
@@ -138,6 +141,9 @@ def render_product(p: SimProduct, padding_kb: int = 200) -> str:
             f'<span class="a-size-small offer-display-feature-text-message">'
             f'<a id="sellerProfileTriggerId" href="/gp/help/seller/at-a-glance.html">{p.seller}</a></span></div></div>'
         )
+        if hide_price:
+            core = ""
+            buybox = buybox[buybox.index('<div id="availability"'):]
     elif p.kind == "unavailable":
         core = ""
         buybox = (
@@ -218,11 +224,16 @@ class SimAmazon:
 
     def __init__(self, catalog: dict[str, SimProduct], policy: Optional[ThrottlePolicy] = None,
                  host: str = "127.0.0.1", port: int = 0, padding_kb: int = 200,
-                 aod_layout: str = "standard", product_page_blocked: Optional[set] = None):
+                 aod_layout: str = "standard", product_page_blocked: Optional[set] = None,
+                 browser_only: Optional[set] = None):
         self.catalog = catalog
         self.aod_layout = aod_layout
         # ASINs whose /dp/ page is always a robot page (the offers page still works)
         self.product_page_blocked = set(product_page_blocked or ())
+        # ASINs whose FIRST product-page request comes back without a price
+        # (ambiguous -> the pipeline's Chrome check); later requests are normal.
+        self.browser_only = set(browser_only or ())
+        self._dp_hits: dict[str, int] = {}
         self.policy = policy or ThrottlePolicy()
         self.padding_kb = padding_kb
         self.stats = SimStats()
@@ -351,7 +362,9 @@ class SimAmazon:
             return
         with self._lock:
             self.stats.product_ok += 1
-        self._send(handler, 200, render_product(product, self.padding_kb))
+            self._dp_hits[asin] = self._dp_hits.get(asin, 0) + 1
+            hide = asin in self.browser_only and self._dp_hits[asin] == 1
+        self._send(handler, 200, render_product(product, self.padding_kb, hide_price=hide))
 
 
 def main() -> None:
@@ -359,14 +372,18 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--asins", type=int, default=100)
     ap.add_argument("--csv", default="sim_batch.csv", help="write an upload-ready CSV of the catalog here")
+    ap.add_argument("--aod-layout", default="standard", choices=("standard", "changed"))
+    ap.add_argument("--browser-only", type=int, default=0,
+                    help="this many in-stock ASINs only show their price on a second visit (exercises Chrome)")
     args = ap.parse_args()
     catalog = make_catalog(args.asins, kinds={"unavailable": 0.03, "no_offer": 0.02})
+    browser_only = [a for a, p in catalog.items() if p.kind == "in_stock"][:args.browser_only]
     with open(args.csv, "w", encoding="utf-8") as f:
         f.write("ASIN No.,Brand Name,SP\n")
         for i, p in enumerate(catalog.values()):
             expected = p.price if i % 5 else p.price + 20  # every 5th row mismatches
             f.write(f"{p.asin},{p.brand},{expected:.0f}\n")
-    sim = SimAmazon(catalog, port=args.port).start()
+    sim = SimAmazon(catalog, port=args.port, aod_layout=args.aod_layout, browser_only=set(browser_only)).start()
     print(f"Fake Amazon at {sim.base_url} — {len(catalog)} products; upload file: {args.csv}")
     print(f"Run the app with: PV_MARKETPLACE_BASE_URL={sim.base_url} python -m price_verifier.app")
     try:
