@@ -43,7 +43,10 @@ from __future__ import annotations
 import logging
 import re
 
-from selectolax.parser import HTMLParser
+# Lexbor, not selectolax's older Modest engine (selectolax.parser.HTMLParser):
+# Modest crashed the whole process (access violation) on live amazon.in
+# product pages in the Windows build.
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from price_verifier.fetcher.models import ParsedProduct
 
@@ -410,7 +413,7 @@ def _normalize_seller(text: str | None) -> str | None:
 def _next_element_text(node) -> str:
     sib = node.next
     while sib is not None:
-        if sib.tag not in ("-text", "-comment"):
+        if not sib.tag.startswith(("-", "_", "!")):   # text / comment nodes (names differ per engine)
             text = _node_text(sib)
             if text:
                 return text
@@ -568,6 +571,12 @@ _BLOCK_INDICATORS = (
     "automated access to amazon data",
     "sorry, we just need to make sure you're not a robot",
     "something went wrong on our end",
+    # Akamai bot-manager interstitial (a JavaScript proof-of-work page, HTTP
+    # 200, ~2 KB, meta-refresh to "/?bm-verify=..."): seen on live amazon.in.
+    # It is a block signal — back off and rotate; a real browser (the Chrome
+    # pass) gets through it the normal way.
+    "bm-verify=",
+    "/_sec/verify?provider=interstitial",
 )
 _BLOCK_TITLE_PREFIXES = ("sorry! something went wrong", "503 - service unavailable")
 _NOT_FOUND_INDICATORS = (

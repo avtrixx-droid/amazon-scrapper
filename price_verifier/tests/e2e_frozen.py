@@ -101,6 +101,7 @@ class Journey:
         self.pids: set[str] = set()
         self.log: list[str] = []
         self.run_id: str | None = None
+        self.engine_killed = False
         self.http = httpx.Client(base_url=APP, follow_redirects=False, trust_env=False, timeout=90)
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -194,6 +195,9 @@ class Journey:
                                 break
                             if int(time.time() - t0) % 15 == 0:
                                 self.say(f"    {last['done']}/{last['total']}  {last.get('phase_label')}")
+                            if (self.args.kill_engine_at and not self.engine_killed
+                                    and last["done"] >= self.args.kill_engine_at):
+                                self.kill_engine()
             except httpx.ReadTimeout:
                 pass
             self.alive()
@@ -203,6 +207,8 @@ class Journey:
                 raise Failed(f"run did not finish within {self.args.timeout} s (last: {last})")
         self.say(f"run finished in {time.time() - t0:.0f} s: {json.dumps(last)[:200]}")
         self.check(last["status"] == "completed", "run completed")
+        if self.args.kill_engine_at:
+            self.check(self.engine_killed, "the engine was killed mid-run and the run still completed")
         self.check(last["done"] == n_rows, f"all {n_rows} rows have a result")
         if self.args.expect_chrome and not self.args.live:
             self.check(last["failed"] == 0, "no row left as Could Not Verify")
@@ -226,6 +232,20 @@ class Journey:
         for _ in range(20):
             self.alive()
         self.check(len(self.pids) == 1, "every request answered by one and the same app process")
+
+    def kill_engine(self):
+        """Kill the scraping engine process(es) hard, the way a native crash
+        ends them — the app must stay up and finish the run on a new one."""
+        import psutil
+
+        app = psutil.Process(self.proc.pid)
+        engines = [p for p in app.children(recursive=True)
+                   if "--multiprocessing-fork" in " ".join(p.cmdline())]
+        self.check(bool(engines), f"found the engine process to kill (pids {[p.pid for p in engines]})")
+        for p in engines:
+            p.kill()
+        self.engine_killed = True
+        self.say(f"    killed engine process(es) {[p.pid for p in engines]} mid-run")
 
     def diagnose(self):
         """Print why it failed into the job output itself (the uploaded logs
@@ -291,23 +311,15 @@ _FALLBACK_LIVE_ASINS = (
 
 
 def harvest_live_asins(n: int, query: str) -> list[str]:
-    """Real ASINs from an amazon.in search, so the live journey checks real
-    product pages. Falls back to a fixed list (rows that don't exist simply
-    come back as Not Found — still a full journey)."""
+    """Real ASINs from amazon.in searches (through Chrome — plain HTTP from a
+    CI address mostly gets Amazon's bot-check page), so the live journey
+    checks real product pages. Falls back to a fixed list."""
     found: list[str] = []
     try:
-        from curl_cffi import requests as creq
+        from price_verifier.tests.live_probe import chrome_harvest
 
-        for page in (1, 2, 3):
-            r = creq.get(f"https://www.amazon.in/s?k={query}&page={page}", impersonate="chrome",
-                         headers={"Accept-Language": "en-IN,en;q=0.9"}, timeout=30)
-            for a in re.findall(r'data-asin="(B0[A-Z0-9]{8})"', r.text):
-                if a not in found:
-                    found.append(a)
-            print(f"search page {page}: HTTP {r.status_code}, {len(found)} ASINs so far", flush=True)
-            if len(found) >= n:
-                break
-            time.sleep(2)
+        found, _ = chrome_harvest([q.strip() for q in query.split(",") if q.strip()], n,
+                                  Path(tempfile.mkdtemp(prefix="pv_harvest_")), fetch=False)
     except Exception as e:  # noqa: BLE001
         print(f"(could not harvest ASINs: {type(e).__name__}: {e})", flush=True)
     for a in _FALLBACK_LIVE_ASINS:
@@ -333,10 +345,12 @@ def main() -> int:
                     help="Chrome is installed: require the Chrome check to price the browser-only rows")
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--artifacts", default="e2e-artifacts")
+    ap.add_argument("--kill-engine-at", type=int, default=0,
+                    help="kill the engine process once this many rows are done (needs psutil)")
     ap.add_argument("--live", action="store_true",
                     help="real amazon.in instead of the simulator (needs internet): checks the app "
                          "survives a real run end to end; doesn't require every row to be priced")
-    ap.add_argument("--live-query", default="lapcare")
+    ap.add_argument("--live-query", default="lapcare,lapcare keyboard,lapcare mouse")
     args = ap.parse_args()
 
     lic = FakeLicenseServer(args.license_port)

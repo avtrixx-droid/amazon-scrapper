@@ -312,7 +312,8 @@ evtSource.onmessage = function(e) {
     } else if (d.status === "paused") {
       document.getElementById("status-line").innerHTML = 'Paused. You can resume it from the <a href="/">Upload</a> page.';
     } else {
-      document.getElementById("status-line").textContent = `Run ended: ${d.status}. You can resume it from the Upload page.`;
+      document.getElementById("status-line").innerHTML = 'The run stopped after repeated errors. Every finished row is saved — ' +
+        'open <a href="/history">History</a> and press <strong>Resume</strong> to continue.';
     }
   }
 };

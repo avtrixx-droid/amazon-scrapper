@@ -72,6 +72,29 @@ _LIVE_TEMP_DIRS: set[str] = set()
 _TEMP_LOCK = threading.Lock()
 
 
+# Chrome / ChromeDriver processes this process started and hasn't quit yet.
+# The engine reports them with its heartbeat (pipeline/engine.py), so if the
+# engine process dies, the app can still kill the Chrome it left behind.
+_LIVE_PIDS: set[int] = set()
+
+
+def live_chrome_pids() -> list[int]:
+    with _TEMP_LOCK:
+        return sorted(_LIVE_PIDS)
+
+
+def _driver_pids(driver) -> list[int]:
+    pids = []
+    for get in (lambda: driver.browser_pid, lambda: driver.service.process.pid):
+        try:
+            pid = int(get())
+            if pid > 0:
+                pids.append(pid)
+        except Exception:
+            pass
+    return pids
+
+
 def _register_temp_dir(path: str) -> None:
     with _TEMP_LOCK:
         _LIVE_TEMP_DIRS.add(path)
@@ -463,6 +486,7 @@ class BrowserFetcher:
         self._sleep = sleep
         self._driver = None
         self._temp_dir: Optional[str] = None
+        self._pids: list[int] = []
         self.starts = 0
 
     @property
@@ -488,6 +512,9 @@ class BrowserFetcher:
                 _remove_temp_dir(self._temp_dir)
                 self._temp_dir = None
                 raise
+        self._pids = _driver_pids(self._driver)
+        with _TEMP_LOCK:
+            _LIVE_PIDS.update(self._pids)
         self.starts += 1
         self._configure_driver()
 
@@ -574,5 +601,8 @@ class BrowserFetcher:
                 driver.quit()
             except Exception:
                 pass
+        pids, self._pids = self._pids, []
+        with _TEMP_LOCK:
+            _LIVE_PIDS.difference_update(pids)
         temp_dir, self._temp_dir = self._temp_dir, None
         _remove_temp_dir(temp_dir)

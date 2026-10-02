@@ -16,7 +16,6 @@ in memory here is disposable UI state.
 
 from __future__ import annotations
 
-import asyncio
 import faulthandler
 import json
 import logging
@@ -39,7 +38,7 @@ from price_verifier import config, licensing
 from price_verifier.excel.report import build_brand_report, build_report
 from price_verifier.ingest.column_detect import detect_columns, load_table, parse_rows
 from price_verifier.ingest.input_parser import InputValidationError
-from price_verifier.pipeline.runner import run_pipeline
+from price_verifier.pipeline.engine import EngineSupervisor
 from price_verifier.storage import checkpoint
 from price_verifier.templates_inline import TEMPLATES
 
@@ -71,6 +70,7 @@ _PHASE_LABELS = {
     "browser": "Final check of the remaining rows in Google Chrome",
     "done": "Finishing up — building your report",
     "cancelled": "Pausing — saving progress",
+    "restart": "Recovering from an error — continuing with the rows left",
 }
 
 _FIELD_UI = {
@@ -198,21 +198,8 @@ def _init_run_state_locked(run_id: str, total: int) -> None:
         "done": 0, "total": total, "matched": 0, "mismatched": 0,
         "out_of_stock": 0, "failed": 0, "status": "running",
         "started_at": time.time(), "phase": "fast", "phase_detail": {},
-        "loop": None, "cancel": None,
+        "supervisor": None,
     }
-
-
-def _record_outcome(run_id: str, outcome) -> None:
-    key = {
-        checkpoint.STATUS_MATCHED: "matched",
-        checkpoint.STATUS_MISMATCHED: "mismatched",
-        checkpoint.STATUS_FAILED: "failed",
-    }.get(outcome.status, "out_of_stock")
-    with _RUN_LOCK:
-        st = _RUN_STATE.get(run_id)
-        if st is not None:
-            st["done"] += 1
-            st[key] += 1
 
 
 def _record_phase(run_id: str, phase: str, detail: dict) -> None:
@@ -231,40 +218,49 @@ def _record_phase(run_id: str, phase: str, detail: dict) -> None:
         st["block_pause"] = None
 
 
+def _record_outcome_status(run_id: str, status: str) -> None:
+    key = {
+        checkpoint.STATUS_MATCHED: "matched",
+        checkpoint.STATUS_MISMATCHED: "mismatched",
+        checkpoint.STATUS_FAILED: "failed",
+    }.get(status, "out_of_stock")
+    with _RUN_LOCK:
+        st = _RUN_STATE.get(run_id)
+        if st is not None:
+            st["done"] += 1
+            st[key] += 1
+
+
 def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_browser: bool) -> None:
-    async def on_item_done(outcome):
-        _record_outcome(run_id, outcome)
-
-    async def on_phase(phase, detail):
-        _record_phase(run_id, phase, detail)
-        await asyncio.to_thread(checkpoint.set_run_phase, run_id, phase)
-
-    async def main():
-        cancel = asyncio.Event()
-        with _RUN_LOCK:
-            _RUN_STATE[run_id]["loop"] = asyncio.get_running_loop()
-            _RUN_STATE[run_id]["cancel"] = cancel
-        return await run_pipeline(
-            run_id, items,
-            concurrency=run_cfg.concurrency,
-            tolerance_abs=run_cfg.tolerance_abs,
-            tolerance_pct=run_cfg.tolerance_pct,
-            use_browser_fallback=use_browser,
-            on_item_done=on_item_done,
-            on_phase=on_phase,
-            cancel_event=cancel,
-        )
-
+    """Runs on a background thread of the app. The scraping itself happens in
+    a separate, supervised engine process (pipeline/engine.py), so nothing it
+    does — not even a crash inside native code — can take this web server
+    down; a dead or stuck engine is restarted on the rows still open."""
+    supervisor = EngineSupervisor(
+        run_id, items,
+        opts={"concurrency": run_cfg.concurrency, "tolerance_abs": run_cfg.tolerance_abs,
+              "tolerance_pct": run_cfg.tolerance_pct, "use_browser": use_browser,
+              "db_path": str(config.DB_PATH), "log_dir": str(config.BASE_DIR / "logs")},
+        on_item=lambda outcome: _record_outcome_status(run_id, outcome["status"]),
+        on_phase=lambda phase, detail: _record_phase(run_id, phase, detail),
+    )
+    with _RUN_LOCK:
+        st = _RUN_STATE.get(run_id)
+        if st is not None:
+            st["supervisor"] = supervisor
+            if st.get("cancel_requested"):   # Pause pressed before the engine existed
+                supervisor.cancel()
+    final_status = "crashed"
     try:
         log.info("Run %s: starting %d rows (concurrency=%d, browser=%s)",
                  run_id, len(items), run_cfg.concurrency, use_browser)
-        # run_pipeline persists its own phase + stats_json to the DB.
-        stats = asyncio.run(main())
-        log.info("Run %s: pipeline finished %s", run_id, json.dumps(stats.as_dict(), default=str))
-        if stats.cancelled:
+        result = supervisor.run()
+        log.info("Run %s: %s (engine restarts: %d%s)", run_id, result.status, result.restarts,
+                 f"; {'; '.join(result.failures)}" if result.failures else "")
+        if result.status == "cancelled":
             checkpoint.mark_run_paused(run_id)
             final_status = "paused"
-        else:
+        elif result.status == "completed":
             # Every row is saved by now, so a report problem (file open in
             # Excel, disk full) must not turn a finished run into "crashed":
             # finish it anyway; /download rebuilds the report on demand.
@@ -275,14 +271,19 @@ def _run_in_background(run_id: str, items, run_cfg: checkpoint.RunConfig, use_br
                 output_path = None
             checkpoint.finish_run(run_id, output_path)
             final_status = "completed"
-        with _RUN_LOCK:
-            _RUN_STATE[run_id]["status"] = final_status
+        else:
+            checkpoint.mark_run_crashed(run_id)
     except Exception:
         log.exception("Run %s crashed", run_id)
-        checkpoint.mark_run_crashed(run_id)
+        try:
+            checkpoint.mark_run_crashed(run_id)
+        except Exception:
+            log.exception("Run %s: could not record the crash", run_id)
+    finally:
         with _RUN_LOCK:
             if run_id in _RUN_STATE:
-                _RUN_STATE[run_id]["status"] = "crashed"
+                _RUN_STATE[run_id]["status"] = final_status
+                _RUN_STATE[run_id]["supervisor"] = None
 
 
 def _start_run(items: list[checkpoint.RunItemRow], run_cfg: checkpoint.RunConfig,
@@ -527,9 +528,11 @@ def retry(run_id: str):
 def cancel(run_id: str):
     with _RUN_LOCK:
         st = _RUN_STATE.get(run_id)
-        loop, ev = (st or {}).get("loop"), (st or {}).get("cancel")
-    if loop is not None and ev is not None:
-        loop.call_soon_threadsafe(ev.set)
+        supervisor = (st or {}).get("supervisor")
+        if st is not None and supervisor is None:
+            st["cancel_requested"] = True
+    if supervisor is not None:
+        supervisor.cancel()
     return ("", 204)
 
 

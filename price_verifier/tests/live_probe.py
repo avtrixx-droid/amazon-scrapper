@@ -54,44 +54,63 @@ print(json.dumps(out))
 """
 
 
-async def fetch_pages(asins: list[str], query: str, want: int, out_dir: Path) -> dict[str, Path]:
-    """Real pages through the tool's own FetchSession (curl_cffi Chrome
-    impersonation, 'continue shopping' click-through)."""
-    from price_verifier.fetcher.http_client import FetchSession, _continue_shopping_form
+def chrome_harvest(queries: list[str], want: int, out_dir: Path,
+                   fetch: bool = True) -> tuple[list[str], dict[str, Path]]:
+    """Real ASINs from amazon.in searches, and their product pages, through
+    the tool's own Chrome fallback (a real browser gets through Amazon's
+    bot-check interstitial the normal way; plain HTTP from a datacenter IP
+    often doesn't)."""
+    from price_verifier.fetcher.browser_fallback import BrowserFetcher
+
+    asins: list[str] = []
+    pages: dict[str, Path] = {}
+    fetcher = BrowserFetcher()
+    try:
+        fetcher.start()
+        for q in queries:
+            if len(asins) >= want:
+                break
+            try:
+                fetcher._driver.get(f"{config.MARKETPLACE_BASE_URL}/s?k={q}")
+                time.sleep(4)
+                html = fetcher._driver.page_source
+                found = [a for a in dict.fromkeys(re.findall(r'data-asin="(B0[A-Z0-9]{8})"', html)) if a not in asins]
+                print(f"chrome search {q!r}: {len(html)} bytes, {len(found)} new ASINs", flush=True)
+                asins.extend(found)
+            except Exception as e:  # noqa: BLE001
+                print(f"chrome search {q!r}: {type(e).__name__}: {e}", flush=True)
+        for asin in (asins[:want] if fetch else []):
+            res = fetcher.fetch(asin)
+            print(f"chrome fetch {asin}: error={res.error} bytes={len(res.html or '')} "
+                  f"({res.elapsed_ms:.0f} ms)", flush=True)
+            if res.html:
+                path = out_dir / f"chrome_{asin}.html"
+                path.write_text(res.html, encoding="utf-8")
+                pages[f"chrome:{asin}"] = path
+            time.sleep(2)
+    except Exception as e:  # noqa: BLE001
+        print(f"chrome unavailable: {type(e).__name__}: {e}", flush=True)
+    finally:
+        fetcher.close()
+    return asins[:want], pages
+
+
+async def http_pages(asins: list[str], out_dir: Path) -> dict[str, Path]:
+    """The same ASINs through the tool's plain-HTTP fetcher (curl_cffi)."""
+    from price_verifier.fetcher.http_client import FetchSession
 
     session = FetchSession()
     await session.start()
     pages: dict[str, Path] = {}
     try:
-        # More ASINs from a real search, through the same identity.
-        ident = session._identity
-        for page in (1, 2):
-            if len(asins) >= want:
-                break
-            try:
-                r = await ident.client.get(f"/s?k={query}&page={page}")
-                html = r.text
-                form = _continue_shopping_form(html, session._host)
-                if form is not None:
-                    r = await ident.client.get(form[0], params=form[1])
-                    html = r.text
-                    r = await ident.client.get(f"/s?k={query}&page={page}")
-                    html = r.text
-                found = [a for a in dict.fromkeys(re.findall(r'data-asin="(B0[A-Z0-9]{8})"', html)) if a not in asins]
-                print(f"search page {page}: HTTP {r.status_code}, {len(html)} bytes, {len(found)} new ASINs", flush=True)
-                asins.extend(found)
-            except Exception as e:  # noqa: BLE001
-                print(f"search page {page}: {type(e).__name__}: {e}", flush=True)
-            await asyncio.sleep(2)
-        for asin in asins[:want]:
+        for asin in asins:
             res = await session.fetch(asin)
-            size = len(res.html or "")
-            print(f"fetch {asin}: status={res.status_code} error={res.error} bytes={size} "
+            print(f"http fetch {asin}: status={res.status_code} error={res.error} bytes={len(res.html or '')} "
                   f"({res.elapsed_ms:.0f} ms)", flush=True)
             if res.html:
-                path = out_dir / f"{asin}.html"
+                path = out_dir / f"http_{asin}.html"
                 path.write_text(res.html, encoding="utf-8")
-                pages[asin] = path
+                pages[f"http:{asin}"] = path
             await asyncio.sleep(2.5)
     finally:
         await session.close()
@@ -123,33 +142,44 @@ def main() -> int:
             pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--asins", type=int, default=12)
-    ap.add_argument("--query", default="lapcare")
+    ap.add_argument("--query", default="lapcare,lapcare keyboard,lapcare mouse")
     ap.add_argument("--dump", type=int, default=3)
     args = ap.parse_args()
 
     print(f"marketplace: {config.MARKETPLACE_BASE_URL}", flush=True)
     out_dir = Path(tempfile.mkdtemp(prefix="pv_probe_"))
-    pages = asyncio.run(fetch_pages(list(FALLBACK_ASINS), args.query, args.asins, out_dir))
-    print(f"\n{len(pages)} pages fetched\n", flush=True)
+    queries = [q.strip() for q in args.query.split(",") if q.strip()]
+    asins, pages = chrome_harvest(queries, args.asins, out_dir)
+    if not asins:
+        asins = list(FALLBACK_ASINS)
+    pages.update(asyncio.run(http_pages(asins, out_dir)))
+    print(f"\n{len(pages)} pages fetched for {len(asins)} ASINs\n", flush=True)
 
     crashes = {"modest": 0, "lexbor": 0, "tool": 0}
-    for asin, path in pages.items():
+    priced: list[str] = []
+    for key, path in pages.items():
+        asin = key.split(":", 1)[1]
         t0 = time.time()
         res = probe(path, asin)
         for engine, r in res.items():
             if "CRASHED" in r:
                 crashes[engine] += 1
-        print(f"== {asin} ({path.stat().st_size} bytes, {time.time() - t0:.1f}s)", flush=True)
+        if res.get("tool", {}).get("price") is not None:
+            priced.append(key)
+        print(f"== {key} ({path.stat().st_size} bytes, {time.time() - t0:.1f}s)", flush=True)
         for engine, r in res.items():
             print(f"   {engine:7s} {json.dumps(r, ensure_ascii=False)}", flush=True)
-    print(f"\nCRASHES: {crashes} over {len(pages)} pages\n", flush=True)
+    print(f"\nCRASHES: {crashes} over {len(pages)} pages; priced by the tool: {len(priced)}\n", flush=True)
 
-    for asin, path in list(pages.items())[: args.dump]:
-        blob = base64.b64encode(gzip.compress(path.read_bytes(), 9)).decode()
-        print(f"=====BEGIN PAGE {asin}=====")
+    # Dump priced pages first (the ones fixtures need most), both sources.
+    order = priced + [k for k in pages if k not in priced]
+    for key in order[: args.dump]:
+        blob = base64.b64encode(gzip.compress(pages[key].read_bytes(), 9)).decode()
+        tag = key.replace(":", "_")
+        print(f"=====BEGIN PAGE {tag}=====")
         for i in range(0, len(blob), 4000):
             print(blob[i:i + 4000])
-        print(f"=====END PAGE {asin}=====", flush=True)
+        print(f"=====END PAGE {tag}=====", flush=True)
     return 1 if crashes["tool"] else 0
 
 

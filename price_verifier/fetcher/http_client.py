@@ -60,7 +60,10 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
-from selectolax.parser import HTMLParser
+# Lexbor, not selectolax's older Modest engine (selectolax.parser.HTMLParser):
+# Modest crashed the whole process (access violation) on live amazon.in
+# product pages in the Windows build.
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from price_verifier import config
 from price_verifier.fetcher.models import FetchResult
