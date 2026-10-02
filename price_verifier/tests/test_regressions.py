@@ -241,3 +241,23 @@ class FrozenWindowsRuntimeTests(unittest.TestCase):
         r = appmod.app.test_client().get("/healthz").get_data(as_text=True)
         self.assertIn("price-verifier-ok", r)
         self.assertIn(f"pid={os.getpid()}", r)
+
+
+class ReadOnlyInstallFolderTests(unittest.TestCase):
+    """The frozen .exe keeps its data next to itself — unless that folder is
+    read-only (Program Files, a locked share): then the user's app-data
+    folder, instead of dying at import before any error can be shown."""
+
+    def test_frozen_base_dir_falls_back_when_exe_folder_is_read_only(self):
+        from price_verifier import config
+
+        with tempfile.TemporaryDirectory() as d:
+            exe_dir, appdata = Path(d) / "ro", Path(d) / "appdata"
+            exe_dir.mkdir()
+            with mock.patch.object(config.sys, "frozen", True, create=True), \
+                    mock.patch.object(config.sys, "executable", str(exe_dir / "PriceVerificationTool.exe")), \
+                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(appdata)}):
+                self.assertEqual(config._get_base_dir(), exe_dir)
+                with mock.patch.object(config, "_writable", lambda folder: False):
+                    self.assertEqual(config._get_base_dir(), appdata / "PriceVerificationTool")
+                self.assertTrue((appdata / "PriceVerificationTool").is_dir())

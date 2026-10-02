@@ -33,8 +33,26 @@ def _get_base_dir() -> Path:
     scraper.py/gui.py app already behaves.
     """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        if _writable(exe_dir):
+            return exe_dir
+        # Started from somewhere read-only (Program Files, a locked network
+        # share): keep the data in the user's own app-data folder instead of
+        # failing before the app can even show an error.
+        fallback = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "PriceVerificationTool"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
     return Path(__file__).resolve().parent
+
+
+def _writable(folder: Path) -> bool:
+    probe = folder / f".pv_write_test_{os.getpid()}"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
 
 BASE_DIR = _get_base_dir()
