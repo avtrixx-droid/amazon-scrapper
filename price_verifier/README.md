@@ -72,6 +72,17 @@ triggered it, so every earlier test passed.
 | `live-windows` | The built `.exe` against **real amazon.in** with real ASINs (harvested from a search through Chrome). It must stay alive end to end, and it prints its logs. |
 | `probe-windows` | Real pages via HTTP and via Chrome, each parsed crash-isolated with both engines. It reports what the parser read and dumps pages for fixtures. |
 
+**Live stress tests** (manual trigger, `live_asins` input; built `.exe`, real
+amazon.in, real ASINs from searches, from a GitHub Windows runner):
+
+| ASINs | Time | Settled | Notes |
+|---|---|---|---|
+| 100 | 126 s | 100/100, all on the first pass | 0 slow-downs |
+| 1,000 | 594 s (≈10 min) | 1,000/1,000, 0 could not verify | 999 on the first pass, 1 via Chrome; 0 slow-downs on the first pass. After the warm-up ramp it held the 2 requests/s ceiling (≈120 ASINs/min). |
+
+From another connection, Amazon may push back more. The Run Info sheet
+shows where the time went, pass by pass.
+
 ## v2 — fixes after the first live test (30 ASINs)
 
 The first live run found three problems:
