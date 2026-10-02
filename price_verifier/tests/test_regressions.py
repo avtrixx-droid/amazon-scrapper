@@ -261,3 +261,19 @@ class ReadOnlyInstallFolderTests(unittest.TestCase):
                 with mock.patch.object(config, "_writable", lambda folder: False):
                     self.assertEqual(config._get_base_dir(), appdata / "PriceVerificationTool")
                 self.assertTrue((appdata / "PriceVerificationTool").is_dir())
+
+
+class DoubleLaunchTests(unittest.TestCase):
+    def test_losing_the_port_race_to_another_copy_opens_it_instead_of_an_error(self):
+        from price_verifier import app as appmod
+
+        with mock.patch.object(appmod, "_harden_runtime"), mock.patch.object(appmod, "_init_startup_log"), \
+                mock.patch.object(appmod, "_already_running", side_effect=[False, False, True]), \
+                mock.patch.object(appmod.app, "run", side_effect=OSError("address in use")), \
+                mock.patch.object(appmod.webbrowser, "open") as opened, \
+                mock.patch.object(appmod, "_show_fatal_error") as fatal, \
+                mock.patch.object(appmod.time, "sleep"), \
+                mock.patch.dict(os.environ, {"PV_NO_BROWSER": "1"}):
+            appmod.main()
+        opened.assert_called_once()
+        fatal.assert_not_called()

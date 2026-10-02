@@ -818,6 +818,14 @@ def main() -> None:
         logging.getLogger("startup").info("serving on %s (pid %s)", url, os.getpid())
         app.run(host=APP_HOST, port=APP_PORT, debug=False, threaded=True)
     except OSError:
+        # Double-clicked twice in quick succession: both copies passed the
+        # check above before either was listening. The other one won the
+        # port, so just show it instead of an error.
+        for _ in range(10):
+            if _already_running():
+                webbrowser.open(url)
+                return
+            time.sleep(0.5)
         logging.getLogger("startup").exception("Port %s unavailable", APP_PORT)
         _show_fatal_error(
             f"The Price Verification Tool couldn't start because port {APP_PORT} is in use by another program.\n\n"
