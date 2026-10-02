@@ -1,9 +1,9 @@
 name: Build Price Verification Tool (Windows)
 
 # Separate from build.yml on purpose — price_verifier/ is an independent
-# tool (see CLAUDE.md's price_verifier/ note) with no license system and no
-# secrets to bake in, so it gets its own simpler pipeline rather than a
-# third job bolted onto the scraper's build. Path-filtered so an unrelated
+# tool (see CLAUDE.md's price_verifier/ note) with no Cython step and only
+# the license server URL to bake in, so it gets its own simpler pipeline
+# rather than a third job bolted onto the scraper's build. Path-filtered so an unrelated
 # scraper.py commit doesn't trigger a rebuild, and no `branches:` filter so
 # it runs on every push to every branch that touches these files — "ready
 # right after commit," not just after merging to main.
@@ -16,6 +16,11 @@ on:
       - "build_price_verifier_windows.bat"
       - ".github/workflows/price_verifier_build.yml"
   workflow_dispatch:       # allows manual trigger from GitHub UI
+    inputs:
+      live_asins:
+        description: "How many real amazon.in ASINs the live journey checks (stress test)"
+        required: false
+        default: "40"
 
 jobs:
   build-windows:
@@ -155,7 +160,7 @@ jobs:
           pyinstaller price_verifier_windows.spec --clean --noconfirm --distpath dist-live --workpath build-live
 
       - name: Live journey on the built .exe against amazon.in
-        run: python -m price_verifier.tests.e2e_frozen --exe dist-live\PriceVerificationTool.exe --live --asins 40 --expect-chrome --timeout 2700 --artifacts live-artifacts
+        run: python -m price_verifier.tests.e2e_frozen --exe dist-live\PriceVerificationTool.exe --live --asins ${{ inputs.live_asins || '40' }} --expect-chrome --timeout 3000 --artifacts live-artifacts
 
       - name: Upload app logs
         if: always()

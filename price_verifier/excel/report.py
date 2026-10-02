@@ -247,6 +247,14 @@ def _write_run_info(ws: Worksheet, run: dict, items: list[dict]) -> None:
         rows.append(("Offers-page double-check", verdict))
     if stats.get("engine_restarts"):
         rows.append(("Recovered from internal errors", f"{stats['engine_restarts']} time(s) — no rows lost"))
+    for key, label in (("fast", "first pass"), ("recovery", "recovery pass"), ("offers", "offers-page pass"),
+                       ("browser", "Chrome check")):
+        ps = stats.get(key) or {}
+        if ps.get("ran") or ps.get("items_in"):
+            rows.append((f"Diagnostics (latest check): {label}",
+                         f"{ps.get('items_in', 0)} rows, {ps.get('resolved', 0)} settled, "
+                         f"{float(ps.get('duration_s') or 0):.0f} s, {ps.get('blocks', 0)} slow-downs, "
+                         f"{ps.get('rotations', 0)} fresh sessions"))
     # Raw counters of the LATEST check only (a Resume / Retry / recovery
     # starts a new one), for support — labelled so they aren't read as totals.
     for key, value in stats.items():

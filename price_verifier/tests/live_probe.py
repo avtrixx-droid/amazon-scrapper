@@ -142,7 +142,7 @@ def main() -> int:
             pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--asins", type=int, default=12)
-    ap.add_argument("--query", default="lapcare,lapcare keyboard,lapcare mouse")
+    ap.add_argument("--query", default="lapcare,lapcare keyboard,lapcare mouse,lapcare webcam,lapcare charger,lapcare laptop adapter,lapcare headphones,lapcare cable,lapcare speaker")
     ap.add_argument("--dump", type=int, default=3)
     args = ap.parse_args()
 

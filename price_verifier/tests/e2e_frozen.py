@@ -371,7 +371,7 @@ def main() -> int:
     ap.add_argument("--live", action="store_true",
                     help="real amazon.in instead of the simulator (needs internet): checks the app "
                          "survives a real run end to end; doesn't require every row to be priced")
-    ap.add_argument("--live-query", default="lapcare,lapcare keyboard,lapcare mouse")
+    ap.add_argument("--live-query", default="lapcare,lapcare keyboard,lapcare mouse,lapcare webcam,lapcare charger,lapcare laptop adapter,lapcare headphones,lapcare cable,lapcare speaker")
     args = ap.parse_args()
 
     lic = FakeLicenseServer(args.license_port)
