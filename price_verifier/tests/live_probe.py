@@ -55,7 +55,7 @@ print(json.dumps(out))
 
 
 def chrome_harvest(queries: list[str], want: int, out_dir: Path,
-                   fetch: bool = True) -> tuple[list[str], dict[str, Path]]:
+                   fetch: bool = True, max_pages: int = 1) -> tuple[list[str], dict[str, Path]]:
     """Real ASINs from amazon.in searches, and their product pages, through
     the tool's own Chrome fallback (a real browser gets through Amazon's
     bot-check interstitial the normal way; plain HTTP from a datacenter IP
@@ -68,17 +68,23 @@ def chrome_harvest(queries: list[str], want: int, out_dir: Path,
     try:
         fetcher.start()
         for q in queries:
-            if len(asins) >= want:
-                break
-            try:
-                fetcher._driver.get(f"{config.MARKETPLACE_BASE_URL}/s?k={q}")
-                time.sleep(4)
-                html = fetcher._driver.page_source
-                found = [a for a in dict.fromkeys(re.findall(r'data-asin="(B0[A-Z0-9]{8})"', html)) if a not in asins]
-                print(f"chrome search {q!r}: {len(html)} bytes, {len(found)} new ASINs", flush=True)
-                asins.extend(found)
-            except Exception as e:  # noqa: BLE001
-                print(f"chrome search {q!r}: {type(e).__name__}: {e}", flush=True)
+            for page in range(1, max_pages + 1):
+                if len(asins) >= want:
+                    break
+                try:
+                    fetcher._driver.get(f"{config.MARKETPLACE_BASE_URL}/s?k={q}&page={page}")
+                    time.sleep(4)
+                    html = fetcher._driver.page_source
+                    found = [a for a in dict.fromkeys(re.findall(r'data-asin="(B0[A-Z0-9]{8})"', html))
+                             if a not in asins]
+                    print(f"chrome search {q!r} p{page}: {len(html)} bytes, {len(found)} new ASINs "
+                          f"({len(asins) + len(found)} total)", flush=True)
+                    asins.extend(found)
+                    if not found:
+                        break   # this query has run dry
+                except Exception as e:  # noqa: BLE001
+                    print(f"chrome search {q!r} p{page}: {type(e).__name__}: {e}", flush=True)
+                    break
         for asin in (asins[:want] if fetch else []):
             res = fetcher.fetch(asin)
             print(f"chrome fetch {asin}: error={res.error} bytes={len(res.html or '')} "

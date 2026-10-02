@@ -340,7 +340,8 @@ def harvest_live_asins(n: int, query: str) -> list[str]:
         from price_verifier.tests.live_probe import chrome_harvest
 
         found, _ = chrome_harvest([q.strip() for q in query.split(",") if q.strip()], n,
-                                  Path(tempfile.mkdtemp(prefix="pv_harvest_")), fetch=False)
+                                  Path(tempfile.mkdtemp(prefix="pv_harvest_")), fetch=False,
+                                  max_pages=7 if n > 60 else 1)
     except Exception as e:  # noqa: BLE001
         print(f"(could not harvest ASINs: {type(e).__name__}: {e})", flush=True)
     for a in _FALLBACK_LIVE_ASINS:
@@ -371,7 +372,10 @@ def main() -> int:
     ap.add_argument("--live", action="store_true",
                     help="real amazon.in instead of the simulator (needs internet): checks the app "
                          "survives a real run end to end; doesn't require every row to be priced")
-    ap.add_argument("--live-query", default="lapcare,lapcare keyboard,lapcare mouse,lapcare webcam,lapcare charger,lapcare laptop adapter,lapcare headphones,lapcare cable,lapcare speaker")
+    ap.add_argument("--live-query", default="lapcare,lapcare keyboard,lapcare mouse,lapcare webcam,lapcare charger,lapcare laptop adapter,lapcare headphones,lapcare cable,lapcare speaker,"
+                    "usb mouse,wireless keyboard,laptop charger,webcam,usb hub,hdmi cable,laptop bag,"
+                    "headphones,power bank,pen drive,laptop stand,laptop cooling pad,mouse pad,"
+                    "extension board,bluetooth speaker,keyboard mouse combo,usb c cable")
     args = ap.parse_args()
 
     lic = FakeLicenseServer(args.license_port)
